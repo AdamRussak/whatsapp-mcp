@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"whatsapp-bridge/internal/database"
+	"whatsapp-bridge/internal/types"
 
-	"go.mau.fi/whatsmeow/types"
+	waTypes "go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
 // GetChatName determines the appropriate name for a chat based on JID and other info
-func (c *Client) GetChatName(messageStore *database.MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string) string {
+func (c *Client) GetChatName(messageStore *database.MessageStore, jid waTypes.JID, chatJID string, conversation interface{}, sender string) string {
 	// First, check if chat already exists in database with a name
 	var existingName string
 	err := messageStore.GetDB().QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
@@ -63,7 +64,7 @@ func (c *Client) GetChatName(messageStore *database.MessageStore, jid types.JID,
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := c.GetGroupInfo(jid)
+			groupInfo, err := c.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -116,6 +117,68 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 	// Extract media info
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := ExtractMediaInfo(msg.Message)
 
+	// Handle poll vote messages - attempt to decrypt the vote
+	var pollVoteInfo *types.PollVoteInfo
+	if mediaType == "poll_vote" {
+		pollUpdate := msg.Message.GetPollUpdateMessage()
+		if pollUpdate != nil {
+			creationMsgKey := pollUpdate.GetPollCreationMessageKey()
+			creationMsgID := ""
+			if creationMsgKey != nil {
+				creationMsgID = creationMsgKey.GetID()
+			}
+
+			pollVoteInfo = &types.PollVoteInfo{
+				Voter:             sender,
+				CreationMessageID: creationMsgID,
+				SelectedOptions:   []string{},
+				SelectedHashes:    []string{},
+			}
+
+			// Attempt to decrypt the poll vote
+			decryptedVote, decryptErr := c.DecryptPollVote(context.Background(), msg)
+			if decryptErr != nil {
+				c.logger.Warnf("Failed to decrypt poll vote: %v", decryptErr)
+			} else if decryptedVote != nil {
+				for _, hash := range decryptedVote.GetSelectedOptions() {
+					hashHex := fmt.Sprintf("%x", hash)
+					pollVoteInfo.SelectedHashes = append(pollVoteInfo.SelectedHashes, hashHex)
+					
+					// Look up option name from database
+					optName, err := messageStore.GetPollOptionName(creationMsgID, hashHex)
+					if err == nil && optName != "" {
+						pollVoteInfo.SelectedOptions = append(pollVoteInfo.SelectedOptions, optName)
+					} else {
+						// Use hash prefix as fallback if name not found
+						pollVoteInfo.SelectedOptions = append(pollVoteInfo.SelectedOptions, "Unknown Option ("+hashHex[:8]+")")
+					}
+				}
+			}
+
+			content = fmt.Sprintf("Poll vote from %s (poll: %s)", sender, creationMsgID)
+			c.logger.Infof("Poll vote from %s on poll %s: %d option(s) selected", sender, creationMsgID, len(pollVoteInfo.SelectedHashes))
+		}
+	}
+
+	// Handle poll creation messages
+	var pollInfo *types.PollInfo
+	if mediaType == "poll" {
+		pollInfo = ExtractPollInfo(msg.Message)
+		if pollInfo != nil {
+			optionNames := make([]string, len(pollInfo.Options))
+			for i, opt := range pollInfo.Options {
+				optionNames[i] = opt.Name
+			}
+			c.logger.Infof("Poll created: %q with options: %v (select up to %d)", pollInfo.Question, optionNames, pollInfo.SelectableCount)
+
+			// Store poll options for later mapping when votes arrive
+			err := messageStore.StorePollOptions(msg.Info.ID, pollInfo.Options)
+			if err != nil {
+				c.logger.Warnf("Failed to store poll options: %v", err)
+			}
+		}
+	}
+
 	// Skip if there's no content and no media
 	if content == "" && mediaType == "" {
 		return
@@ -149,7 +212,11 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 		}
 
 		// Log based on message type
-		if mediaType != "" {
+		if mediaType == "poll" {
+			fmt.Printf("[%s] %s %s: [POLL] %s\n", timestamp, direction, sender, content)
+		} else if mediaType == "poll_vote" {
+			fmt.Printf("[%s] %s %s: [POLL VOTE] %s\n", timestamp, direction, sender, content)
+		} else if mediaType != "" {
 			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
 		} else if content != "" {
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
@@ -160,9 +227,9 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 	if webhookManager != nil {
 		// Cast to webhook manager and process message
 		if wm, ok := webhookManager.(interface {
-			ProcessMessage(client interface{}, msg *events.Message, chatName string)
+			ProcessMessage(client interface{}, msg *events.Message, chatName string, pollInfo *types.PollInfo, pollVoteInfo *types.PollVoteInfo)
 		}); ok {
-			wm.ProcessMessage(c, msg, name)
+			wm.ProcessMessage(c, msg, name, pollInfo, pollVoteInfo)
 		}
 	}
 }
@@ -181,7 +248,7 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 		chatJID := *conversation.ID
 
 		// Try to parse the JID
-		jid, err := types.ParseJID(chatJID)
+		jid, err := waTypes.ParseJID(chatJID)
 		if err != nil {
 			c.logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
 			continue
@@ -300,6 +367,17 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 					} else {
 						c.logger.Infof("Stored message: [%s] %s -> %s: %s",
 							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
+					}
+
+					// Store poll options for history sync if it's a poll
+					if mediaType == "poll" && msg.Message.Message != nil {
+						pollInfo := ExtractPollInfo(msg.Message.Message)
+						if pollInfo != nil {
+							err := messageStore.StorePollOptions(msgID, pollInfo.Options)
+							if err != nil {
+								c.logger.Warnf("Failed to store poll options from history sync: %v", err)
+							}
+						}
 					}
 				}
 			}

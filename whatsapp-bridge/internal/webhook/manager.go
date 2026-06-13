@@ -157,7 +157,7 @@ func (wm *Manager) matchesString(text, pattern, matchType string) bool {
 }
 
 // ProcessMessage processes a message and sends webhooks if triggers match
-func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatName string) {
+func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatName string, pollInfo *types.PollInfo, pollVoteInfo *types.PollVoteInfo) {
 	startTime := time.Now()
 
 	// Find matching webhook configurations
@@ -176,30 +176,40 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 	senderName := msg.Info.Sender.User
 	// Note: We'll need to handle contact lookup when integrating with the client
 
+	// Determine event type
+	eventType := "message_received"
+	if mediaType == "poll" {
+		eventType = "poll_created"
+	} else if mediaType == "poll_vote" {
+		eventType = "poll_vote"
+	}
+
 	// Build base payload
 	basePayload := types.WebhookPayload{
-		EventType: "message_received",
+		EventType: eventType,
 		Timestamp: msg.Info.Timestamp.Format(time.RFC3339),
 		Message: types.WebhookMessageInfo{
-			ID:         msg.Info.ID,
-			ChatJID:    msg.Info.Chat.String(),
-			ChatName:   chatName,
-			Sender:     msg.Info.Sender.String(),
-			SenderName: senderName,
-			Content:    content,
-			Timestamp:  msg.Info.Timestamp.Format(time.RFC3339),
-			PushName:   msg.Info.PushName,
-			IsFromMe:   msg.Info.IsFromMe,
-			MediaType:  mediaType,
-			Filename:   filename,
+			ID:           msg.Info.ID,
+			ChatJID:      msg.Info.Chat.String(),
+			ChatName:     chatName,
+			Sender:       msg.Info.Sender.String(),
+			SenderName:   senderName,
+			Content:      content,
+			Timestamp:    msg.Info.Timestamp.Format(time.RFC3339),
+			PushName:     msg.Info.PushName,
+			IsFromMe:     msg.Info.IsFromMe,
+			MediaType:    mediaType,
+			Filename:     filename,
+			PollInfo:     pollInfo,
+			PollVoteInfo: pollVoteInfo,
 		},
 		Metadata: types.WebhookMetadata{
 			ProcessingTimeMs: time.Since(startTime).Milliseconds(),
 		},
 	}
 
-	// Add media download URL if it's a media message
-	if mediaType != "" {
+	// Add media download URL if it's a media message (not polls)
+	if mediaType != "" && mediaType != "poll" && mediaType != "poll_vote" {
 		basePayload.Message.MediaDownloadURL = "http://localhost:8080/api/download"
 	}
 

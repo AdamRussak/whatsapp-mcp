@@ -316,9 +316,15 @@ class WebhookManager {
                 valueInput.disabled = true;
                 valueInput.value = '';
                 valueInput.placeholder = 'No value needed for "all messages"';
+                valueInput.removeAttribute('list');
+            } else if (typeSelect.value === 'media_type') {
+                valueInput.disabled = false;
+                valueInput.placeholder = 'Select or type media type (e.g., poll, image)';
+                valueInput.setAttribute('list', 'mediaTypeOptions');
             } else {
                 valueInput.disabled = false;
                 valueInput.placeholder = 'Trigger value';
+                valueInput.removeAttribute('list');
             }
         });
         

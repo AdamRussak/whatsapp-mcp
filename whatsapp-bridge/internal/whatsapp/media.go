@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"whatsapp-bridge/internal/types"
 )
 
 // ExtractTextContent extracts text content from a WhatsApp message
@@ -24,14 +26,75 @@ func ExtractTextContent(msg *waProto.Message) string {
 		return extendedText.GetText()
 	}
 
-	// For now, we're ignoring non-text messages
+	// Check for poll creation message - return poll question as text content
+	if poll := GetPollCreationFromMessage(msg); poll != nil {
+		return poll.GetName()
+	}
+
 	return ""
+}
+
+// GetPollCreationFromMessage checks all poll creation message versions and returns the first non-nil one
+func GetPollCreationFromMessage(msg *waProto.Message) *waProto.PollCreationMessage {
+	if msg == nil {
+		return nil
+	}
+	if p := msg.GetPollCreationMessage(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV2(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV3(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV5(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV6(); p != nil {
+		return p
+	}
+	return nil
+}
+
+// ExtractPollInfo extracts poll creation information from a WhatsApp message
+func ExtractPollInfo(msg *waProto.Message) *types.PollInfo {
+	poll := GetPollCreationFromMessage(msg)
+	if poll == nil {
+		return nil
+	}
+
+	options := make([]types.PollOption, len(poll.GetOptions()))
+	for i, opt := range poll.GetOptions() {
+		optName := opt.GetOptionName()
+		optHash := sha256.Sum256([]byte(optName))
+		options[i] = types.PollOption{
+			Name:   optName,
+			SHA256: fmt.Sprintf("%x", optHash[:]),
+		}
+	}
+
+	return &types.PollInfo{
+		Question:        poll.GetName(),
+		Options:         options,
+		SelectableCount: poll.GetSelectableOptionsCount(),
+	}
 }
 
 // ExtractMediaInfo extracts media information from a WhatsApp message
 func ExtractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
+	}
+
+	// Check for poll creation message
+	if GetPollCreationFromMessage(msg) != nil {
+		return "poll", "", "", nil, nil, nil, 0
+	}
+
+	// Check for poll update (vote) message
+	if msg.GetPollUpdateMessage() != nil {
+		return "poll_vote", "", "", nil, nil, nil, 0
 	}
 
 	// Check for image message

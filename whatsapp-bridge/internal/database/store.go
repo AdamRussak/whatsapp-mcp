@@ -103,6 +103,13 @@ func createTables(db *sql.DB) error {
 			delivered_at TIMESTAMP,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);
+
+		CREATE TABLE IF NOT EXISTS poll_options (
+			poll_id TEXT,
+			option_name TEXT,
+			option_hash TEXT,
+			PRIMARY KEY (poll_id, option_hash)
+		);
 	`)
 	return err
 }

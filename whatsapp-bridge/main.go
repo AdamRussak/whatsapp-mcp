@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -61,7 +62,16 @@ func main() {
 			logger.Infof("Connected to WhatsApp")
 
 		case *events.LoggedOut:
-			logger.Warnf("Device logged out, please scan QR code to log in again")
+			logger.Warnf("Device logged out. Exiting to generate new QR code on restart...")
+			os.Exit(1)
+			
+		case *events.ClientOutdated:
+			logger.Errorf("Client is outdated (405). Deleting session and exiting to generate new QR code on restart...")
+			err := client.Store.Delete(context.Background())
+			if err != nil {
+				logger.Errorf("Failed to delete session: %v", err)
+			}
+			os.Exit(1)
 		}
 	})
 

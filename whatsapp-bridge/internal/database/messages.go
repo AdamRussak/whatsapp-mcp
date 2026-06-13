@@ -78,3 +78,34 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 
 	return chats, nil
 }
+
+// StorePollOptions stores the options for a poll
+func (store *MessageStore) StorePollOptions(pollID string, options []types.PollOption) error {
+	tx, err := store.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO poll_options (poll_id, option_name, option_hash) VALUES (?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, opt := range options {
+		_, err = stmt.Exec(pollID, opt.Name, opt.SHA256)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetPollOptionName retrieves the text name for a poll option hash
+func (store *MessageStore) GetPollOptionName(pollID, optionHash string) (string, error) {
+	var name string
+	err := store.db.QueryRow("SELECT option_name FROM poll_options WHERE poll_id = ? AND option_hash = ?", pollID, optionHash).Scan(&name)
+	return name, err
+}

@@ -58,18 +58,41 @@ type WebhookTriggerInfo struct {
 }
 
 type WebhookMessageInfo struct {
-	ID               string `json:"id"`
-	ChatJID          string `json:"chat_jid"`
-	ChatName         string `json:"chat_name"`
-	Sender           string `json:"sender"`
-	SenderName       string `json:"sender_name"`
-	Content          string `json:"content"`
-	Timestamp        string `json:"timestamp"`
-	PushName         string `json:"push_name,omitempty"`
-	IsFromMe         bool   `json:"is_from_me"`
-	MediaType        string `json:"media_type"`
-	Filename         string `json:"filename"`
-	MediaDownloadURL string `json:"media_download_url"`
+	ID               string        `json:"id"`
+	ChatJID          string        `json:"chat_jid"`
+	ChatName         string        `json:"chat_name"`
+	Sender           string        `json:"sender"`
+	SenderName       string        `json:"sender_name"`
+	Content          string        `json:"content"`
+	Timestamp        string        `json:"timestamp"`
+	PushName         string        `json:"push_name,omitempty"`
+	IsFromMe         bool          `json:"is_from_me"`
+	MediaType        string        `json:"media_type"`
+	Filename         string        `json:"filename"`
+	MediaDownloadURL string        `json:"media_download_url"`
+	PollInfo         *PollInfo     `json:"poll_info,omitempty"`
+	PollVoteInfo     *PollVoteInfo `json:"poll_vote_info,omitempty"`
+}
+
+// PollInfo represents a poll creation message
+type PollInfo struct {
+	Question        string       `json:"question"`
+	Options         []PollOption `json:"options"`
+	SelectableCount uint32       `json:"selectable_count"`
+}
+
+// PollOption represents a single option in a poll
+type PollOption struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"` // hex-encoded hash for vote matching
+}
+
+// PollVoteInfo represents a poll vote message
+type PollVoteInfo struct {
+	Voter             string   `json:"voter"`
+	SelectedOptions   []string `json:"selected_options"`      // option names (if decryptable)
+	SelectedHashes    []string `json:"selected_hashes"`       // hex SHA256 hashes
+	CreationMessageID string   `json:"creation_message_id"`
 }
 
 type WebhookMetadata struct {

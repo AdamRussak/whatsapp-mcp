@@ -2,6 +2,7 @@ import os
 import logging
 import gradio as gr
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -35,8 +36,11 @@ logging.basicConfig(
 mcp = FastMCP(
     "whatsapp",
     log_level="DEBUG" if os.environ.get('DEBUG') == 'true' else "INFO",
-    auth_required=os.environ.get('DANGEROUSLY_OMIT_AUTH') != 'true',
-    
+    host=os.environ.get('HOST', '0.0.0.0'),
+    port=int(os.environ.get('PORT', '8081')),
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
 )
 
 # Define MCP tools (these will be exposed through both MCP and Gradio)
