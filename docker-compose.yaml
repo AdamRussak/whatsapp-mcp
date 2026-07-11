@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
     healthcheck:
       # Probes the bridge HTTP port; a non-responsive process gets marked unhealthy
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/send", "--method=OPTIONS"]
+      test: ["CMD", "curl", "-f", "-s", "-X", "OPTIONS", "http://localhost:8080/api/send"]
       interval: 60s
       timeout: 10s
       retries: 3
