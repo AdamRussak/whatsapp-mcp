@@ -58,20 +58,8 @@ func main() {
 			// Process history sync events
 			client.HandleHistorySync(messageStore, v)
 
-		case *events.Connected:
-			logger.Infof("Connected to WhatsApp")
-
-		case *events.LoggedOut:
-			logger.Warnf("Device logged out. Exiting to generate new QR code on restart...")
-			os.Exit(1)
-			
-		case *events.ClientOutdated:
-			logger.Errorf("Client is outdated (405). Deleting session and exiting to generate new QR code on restart...")
-			err := client.Store.Delete(context.Background())
-			if err != nil {
-				logger.Errorf("Failed to delete session: %v", err)
-			}
-			os.Exit(1)
+		case *events.Connected, *events.LoggedOut, *events.ClientOutdated, *events.ConnectFailure:
+			client.HandleConnectionEvent(context.Background(), v, os.Exit)
 		}
 	})
 

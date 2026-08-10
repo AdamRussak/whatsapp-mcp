@@ -10,6 +10,7 @@ import (
 	"github.com/mdp/qrterminal"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -29,7 +30,7 @@ func NewClient(logger waLog.Logger) (*Client, error) {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on&_busy_timeout=5000", dbLog)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
@@ -107,4 +108,51 @@ func (c *Client) Connect() error {
 
 	c.logger.Infof("✓ Connected to WhatsApp!")
 	return nil
+}
+
+// DeleteSessionIfExists deletes the device session from the database if a valid device ID exists.
+// If the device ID is nil (not yet paired or already deleted), it skips database deletion and returns nil.
+func (c *Client) DeleteSessionIfExists(ctx context.Context) error {
+	if c == nil || c.Client == nil || c.Store == nil {
+		return nil
+	}
+	if c.Store.ID != nil {
+		if err := c.Store.Delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete session: %w", err)
+		}
+		c.logger.Infof("Session deleted successfully")
+		return nil
+	}
+	c.logger.Warnf("No active session to delete (device not yet paired or ID is nil)")
+	return nil
+}
+
+// HandleConnectionEvent processes connection-level events like ClientOutdated, LoggedOut, and ConnectFailure.
+// onExit callback is invoked when the application should exit due to permanent disconnection or logout.
+func (c *Client) HandleConnectionEvent(ctx context.Context, evt interface{}, onExit func(int)) {
+	switch v := evt.(type) {
+	case *events.Connected:
+		c.logger.Infof("Connected to WhatsApp")
+
+	case *events.LoggedOut:
+		c.logger.Warnf("Device logged out. Deleting session and exiting to generate new QR code on restart...")
+		if err := c.DeleteSessionIfExists(ctx); err != nil {
+			c.logger.Errorf("Failed to delete session after logout: %v", err)
+		}
+		if onExit != nil {
+			onExit(1)
+		}
+
+	case *events.ClientOutdated:
+		c.logger.Errorf("Client is outdated (405). Deleting session and exiting to generate new QR code on restart...")
+		if err := c.DeleteSessionIfExists(ctx); err != nil {
+			c.logger.Errorf("Failed to delete session: %v", err)
+		}
+		if onExit != nil {
+			onExit(1)
+		}
+
+	case *events.ConnectFailure:
+		c.logger.Errorf("Connection failure: %v (reason: %s)", v.Reason, v.Message)
+	}
 }

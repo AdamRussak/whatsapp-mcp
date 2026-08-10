@@ -20,11 +20,14 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
-	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	// Open SQLite database for messages with 5s busy timeout
+	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
+
+	// Limit connection pool to 1 connection to prevent concurrent writers from fighting over file locks
+	db.SetMaxOpenConns(1)
 
 	// Create tables if they don't exist
 	err = createTables(db)

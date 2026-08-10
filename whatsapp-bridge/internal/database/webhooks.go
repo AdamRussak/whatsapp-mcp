@@ -64,24 +64,25 @@ func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var configs []*types.WebhookConfig
 	for rows.Next() {
 		config := &types.WebhookConfig{}
 		err := rows.Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
 			&config.Enabled, &config.CreatedAt, &config.UpdatedAt)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
+		configs = append(configs, config)
+	}
+	rows.Close()
 
-		// Load triggers for each config
+	// Load triggers for each config after closing rows to avoid single-connection pool deadlock
+	for _, config := range configs {
 		config.Triggers, err = store.GetWebhookTriggers(config.ID)
 		if err != nil {
 			return nil, err
 		}
-
-		configs = append(configs, config)
 	}
 
 	return configs, nil
