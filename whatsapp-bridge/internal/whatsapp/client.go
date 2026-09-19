@@ -22,6 +22,7 @@ type Client struct {
 	logger            waLog.Logger
 	mediaRetries      sync.Map // messageID (string) -> chan *events.MediaRetry
 	mediaRetryTimeout time.Duration
+	folderKeys        sync.Map // chat JID (string) -> store/media folder key (string)
 }
 
 // NewClient creates a new WhatsApp client instance

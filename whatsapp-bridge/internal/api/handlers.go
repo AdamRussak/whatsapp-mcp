@@ -386,6 +386,13 @@ func (s *Server) handleDownloadBatch(w http.ResponseWriter, r *http.Request) {
 		skipCached = *req.SkipCached
 	}
 
+	for name, value := range map[string]string{"after": req.After, "before": req.Before} {
+		if _, err := database.NormalizeTimeFilter(value); err != nil {
+			SendJSONError(w, fmt.Sprintf("invalid %s: %v", name, err), http.StatusBadRequest)
+			return
+		}
+	}
+
 	resolvedJIDs, err := whatsapp.ResolveChatJIDs(req.Chat, s.storeDir)
 	if err != nil {
 		SendJSONError(w, fmt.Sprintf("Failed to resolve chat JIDs: %v", err), http.StatusBadRequest)
@@ -423,6 +430,7 @@ func (s *Server) handleDownloadBatch(w http.ResponseWriter, r *http.Request) {
 		"job_id":        jobID,
 		"chat":          req.Chat,
 		"resolved_jids": resolvedJIDs,
+		"folder":        filepath.ToSlash(filepath.Join("media", whatsapp.ChatFolderKey(resolvedJIDs))),
 		"total":         len(messages),
 		"status_url":    s.publicBaseURL + "/api/download/batch/" + jobID,
 	})
@@ -444,22 +452,7 @@ func (s *Server) runBatchDownload(
 		pace = 250 * time.Millisecond
 	}
 
-	folderKey := chat
-	if !strings.HasSuffix(chat, "@g.us") {
-		for _, j := range resolvedJIDs {
-			if strings.HasSuffix(j, "@s.whatsapp.net") {
-				folderKey = strings.SplitN(j, "@", 2)[0]
-				break
-			}
-		}
-	}
-	folderKey = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
-			return r
-		}
-		return '_'
-	}, folderKey)
-
+	folderKey := whatsapp.ChatFolderKey(resolvedJIDs)
 	outDir := filepath.Join(s.storeDir, "media", folderKey)
 	_ = os.MkdirAll(outDir, 0755)
 

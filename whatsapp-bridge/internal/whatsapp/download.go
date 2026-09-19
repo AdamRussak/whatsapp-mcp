@@ -90,24 +90,40 @@ func writeAtomic(targetPath string, data []byte) error {
 	return os.Rename(tmpPath, targetPath)
 }
 
-// resolveTargetFolder returns the subfolder key inside store/media for a given chat JID
-func resolveTargetFolder(chatJID, storeDir string) string {
-	if strings.HasSuffix(chatJID, "@g.us") {
-		return safePathComponent(chatJID)
-	}
-
-	jids, err := ResolveChatJIDs(chatJID, storeDir)
-	if err == nil {
-		for _, j := range jids {
-			if strings.HasSuffix(j, "@s.whatsapp.net") {
-				user := strings.SplitN(j, "@", 2)[0]
-				return safePathComponent(user)
-			}
+// ChatFolderKey returns the store/media subfolder for a chat from all of its JIDs (as returned
+// by ResolveChatJIDs): a group's full JID, else the phone number, else the first JID's user part.
+// The batch job and the per-message download both use it, so files and index.json always
+// land in the same folder.
+func ChatFolderKey(jids []string) string {
+	for _, j := range jids {
+		if strings.HasSuffix(j, "@g.us") {
+			return safePathComponent(j)
 		}
 	}
+	for _, j := range jids {
+		if strings.HasSuffix(j, "@s.whatsapp.net") {
+			return safePathComponent(strings.SplitN(j, "@", 2)[0])
+		}
+	}
+	if len(jids) > 0 {
+		return safePathComponent(strings.SplitN(jids[0], "@", 2)[0])
+	}
+	return "unknown"
+}
 
-	user := strings.SplitN(chatJID, "@", 2)[0]
-	return safePathComponent(user)
+// mediaFolderKey resolves a chat JID's folder key once and caches it, so a batch doesn't
+// open whatsapp.db for every message
+func (c *Client) mediaFolderKey(chatJID, storeDir string) string {
+	if key, ok := c.folderKeys.Load(chatJID); ok {
+		return key.(string)
+	}
+	jids, err := ResolveChatJIDs(chatJID, storeDir)
+	if err != nil || len(jids) == 0 {
+		jids = []string{chatJID}
+	}
+	key := ChatFolderKey(jids)
+	c.folderKeys.Store(chatJID, key)
+	return key
 }
 
 // DownloadMedia downloads an audio message, checking cache, downloading from WhatsApp,
@@ -133,7 +149,7 @@ func (c *Client) DownloadMedia(
 		return nil, fmt.Errorf("message %s is not an audio message (type: %s)", messageID, info.MediaType)
 	}
 
-	folderKey := resolveTargetFolder(chatJID, storeDir)
+	folderKey := c.mediaFolderKey(chatJID, storeDir)
 	targetDir := filepath.Join(storeDir, "media", folderKey)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create media directory: %w", err)

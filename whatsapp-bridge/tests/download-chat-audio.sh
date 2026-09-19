@@ -25,6 +25,7 @@ RESP=$(curl -s -f -X POST "${BRIDGE_URL}/api/download/batch" \
 JOB_ID=$(echo "${RESP}" | jq -r '.job_id // empty')
 TOTAL=$(echo "${RESP}" | jq -r '.total // 0')
 RESOLVED_JIDS=$(echo "${RESP}" | jq -r '.resolved_jids | join(", ") // ""')
+FOLDER=$(echo "${RESP}" | jq -r '.folder // empty')
 
 if [ -z "$JOB_ID" ]; then
     echo "Failed to start batch job. Response:"
@@ -35,6 +36,7 @@ fi
 echo "Job started successfully!"
 echo "Job ID:        ${JOB_ID}"
 echo "Resolved JIDs: ${RESOLVED_JIDS}"
+echo "Folder:        store/${FOLDER}"
 echo "Total items:   ${TOTAL}"
 echo "--------------------------------------------------"
 
@@ -75,9 +77,8 @@ while true; do
     fi
 done
 
-# 3. Print output directory and index.json location
-FOLDER_KEY=$(echo "${CHAT}" | tr -cd '[:alnum:]_-')
-echo "Output files saved under store/media/"
-if [ -f "store/media/${FOLDER_KEY}/index.json" ]; then
-    echo "Index file: store/media/${FOLDER_KEY}/index.json"
+# 3. Print output directory and index.json location (folder as reported by the bridge)
+echo "Output files saved under store/${FOLDER}/"
+if [ -n "${FOLDER}" ] && [ -f "store/${FOLDER}/index.json" ]; then
+    echo "Index file: store/${FOLDER}/index.json"
 fi

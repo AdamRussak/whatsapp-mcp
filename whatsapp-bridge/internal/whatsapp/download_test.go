@@ -100,3 +100,23 @@ func TestRetryFailureStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestChatFolderKey(t *testing.T) {
+	cases := []struct {
+		jids []string
+		want string
+	}{
+		// Existing folders under store/media must keep their names
+		{[]string{"18674685612157@lid", "972523996302@s.whatsapp.net"}, "972523996302"},
+		{[]string{"972523531857-1556783116@g.us"}, "972523531857-1556783116_g_us"},
+		// A LID with no phone mapping: the LID user part, same for the batch and each download
+		{[]string{"244332250583270@lid"}, "244332250583270"},
+		{[]string{"../../etc@lid"}, "______etc"},
+		{nil, "unknown"},
+	}
+	for _, c := range cases {
+		if got := ChatFolderKey(c.jids); got != c.want {
+			t.Errorf("ChatFolderKey(%v) = %q, want %q", c.jids, got, c.want)
+		}
+	}
+}

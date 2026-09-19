@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -165,6 +166,34 @@ func (store *MessageStore) GetMediaInfo(id, chatJID string) (*MediaInfo, error) 
 	return &info, nil
 }
 
+// storedTimestampLayout is how go-sqlite3 writes messages.timestamp (always UTC in this DB)
+const storedTimestampLayout = "2006-01-02 15:04:05-07:00"
+
+// timeFilterLayouts are the accepted formats for after/before filters
+var timeFilterLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05-07:00",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+	"2006-01-02",
+}
+
+// NormalizeTimeFilter converts an after/before filter to the stored timestamp format, so the
+// text comparison in SQL orders correctly ("2026-01-01T00:00:00Z" would otherwise sort after
+// every stored "2026-01-01 ..." value). Inputs without a zone are taken as UTC. Empty stays empty.
+func NormalizeTimeFilter(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	for _, layout := range timeFilterLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC().Format(storedTimestampLayout), nil
+		}
+	}
+	return "", fmt.Errorf("unrecognized time %q (use RFC 3339, \"YYYY-MM-DD HH:MM:SS\" or YYYY-MM-DD)", s)
+}
+
 // ListAudioMessages lists audio messages across the given chat JIDs (read-only)
 func (store *MessageStore) ListAudioMessages(chatJIDs []string, after, before string, limit int) ([]MediaInfo, error) {
 	if len(chatJIDs) == 0 {
@@ -185,6 +214,14 @@ func (store *MessageStore) ListAudioMessages(chatJIDs []string, after, before st
 	}
 	query += strings.Join(placeholders, ",") + ")"
 
+	after, err := NormalizeTimeFilter(after)
+	if err != nil {
+		return nil, fmt.Errorf("invalid after: %w", err)
+	}
+	before, err = NormalizeTimeFilter(before)
+	if err != nil {
+		return nil, fmt.Errorf("invalid before: %w", err)
+	}
 	if after != "" {
 		query += " AND timestamp > ?"
 		args = append(args, after)

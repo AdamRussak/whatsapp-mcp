@@ -55,9 +55,9 @@ Order: **Milestone 1 → Phase 0 → Phase 1 + Phase 5 → Phases 2/3 → Phase 
 | B3 ✅ | high | *(fixed: `MarkInterruptedJobs` at startup)* A job left `running` by a bridge restart blocks all new batches (409) forever. | `media_store.go`, `main.go` |
 | B4 ✅ | med | *(fixed: `CancelJob` only touches running jobs, else 404)* `DELETE /api/download/batch/{id}` marks any job `cancelled`, including finished or non-existent ones. | `handlers.go` |
 | B5 ✅ | med | *(fixed: per-item timeouts are the retry timeout + 30 s (batch) / + 60 s (single))* `MEDIA_RETRY_TIMEOUT_S` is read but never used; retry timeout is hardcoded 30 s. Per-item timeout is 60 s in batch, 90 s single. | `config.go`, `download.go` |
-| B6 🐞 | med | Folder key is computed three different ways (`resolveTargetFolder`, `runBatchDownload`, `tr -cd` in the shell script). For an unmapped `@lid` or a group, `index.json` / the script's "Index file" line point at the wrong folder. `ResolveChatJIDs` also opens `whatsapp.db` once per message (~4,000× per batch). | `download.go`, `handlers.go`, `tests/download-chat-audio.sh` |
+| B6 ✅ | med | *(fixed: `ChatFolderKey` + per-chat cache; batch response returns `folder`)* Folder key is computed three different ways (`resolveTargetFolder`, `runBatchDownload`, `tr -cd` in the shell script). For an unmapped `@lid` or a group, `index.json` / the script's "Index file" line point at the wrong folder. `ResolveChatJIDs` also opens `whatsapp.db` once per message (~4,000× per batch). | `download.go`, `handlers.go`, `tests/download-chat-audio.sh` |
 | B7 ✅ | med | *(fixed: removed; every message goes through `HandleMessage` again)* Placeholder-resend hack (out of scope): sends a `BuildUnavailableMessageRequest` peer message to the phone for **every** retried item, and `HandlePlaceholderMessage` swallows any matching `events.Message` so it is never stored or sent to webhooks (even when the channel is full). It has never fired (0 in logs). | `download.go`, `client.go`, `main.go` |
-| B8 🐞 | low | `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
+| B8 ✅ | low | *(fixed: `NormalizeTimeFilter`; invalid → 400)* `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
 | B9 | low | `MediaDownloader` is unused. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` flags `config.go`, `download.go` (and pre-existing `types.go`, `handlers.go`, two tests). Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
 | B10 | low | `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
@@ -75,7 +75,7 @@ Order: **Milestone 1 → Phase 0 → Phase 1 + Phase 5 → Phases 2/3 → Phase 
    - if HMAC fails → the phone re-encrypted with a new key; the only route is the placeholder resend (keep B7's path but fix it), or accept these as unrecoverable.
    - Also try the upgraded whatsmeow (Phase 0) on a copy: its retry/media changes may matter here.
 4. ✅ **Fix B2, B3, B5** (and B4, B7, the `index.json` overwrite; see §2.6) (make the job resumable and honest): map `ErrMediaNotAvailableOnPhone` / `NOT_FOUND` to `expired_not_on_phone`; on startup mark leftover `running` jobs `interrupted`; use `MEDIA_RETRY_TIMEOUT_S`.
-5. **Fix B6, B8** (B4, B7 done in step 4): cancel only `running` jobs (404 otherwise); compute the folder key once per job in one function and return it in the batch response; gate placeholder resend behind a flag, don't swallow unmatched/duplicate events; normalise `after`/`before` to the stored format.
+5. ✅ **Fix B6, B8** (B4, B7 done in step 4). See §2.7: cancel only `running` jobs (404 otherwise); compute the folder key once per job in one function and return it in the batch response; gate placeholder resend behind a flag, don't swallow unmatched/duplicate events; normalise `after`/`before` to the stored format.
 6. **Missing tests**: LID expansion, cache hit, retry waiter (fake `events.MediaRetry`), "no writes to `messages`" (wrap the DB with a driver that fails on any non-`SELECT`).
 7. **Execute §5.5**: baseline dump → `store-test` rehearsal (limit 20) → live run on `972523996302` → after-run diff. Tick §5.6.
 8. Then **Phase 0** (pin `mcp[cli]<2` first — cheapest, prevents a broken rebuild).
@@ -132,6 +132,20 @@ CDN links last between 11 and 19 days. Anything older depends on media retry.
 **Verified live:** a batch covering only `AC9F58C8…` → `skipped: 1`, 0 retry requests. `DELETE` on a finished job → 404, status stays `completed`. `index.json` for `972523996302` → `ok=24 rekeyed_on_phone=3`, matching the 24 files. The chat's 20,095 `messages` rows are byte-identical to the snapshot taken before step 2.
 
 **`media.db` now:** `ok` 25 · `rekeyed_on_phone` 3 · `failed` 3 (2 unproven B1, 1 `context canceled`) · `retry_timeout` 1.
+
+### 2.7 Folder key and date filter (2026-09-19, 15:40–15:50 UTC)
+
+| Change | Where |
+|---|---|
+| **B6:** `ChatFolderKey(jids)` is the only folder rule: group → full JID sanitised (`972523531857-1556783116_g_us`); else phone number (`972523996302`); else the LID user part. It keeps the existing folder names. The per-message download resolves a chat's key once and caches it (`Client.folderKeys`), instead of opening `whatsapp.db` per message. The batch response returns `folder` (e.g. `media/972523996302`), which `tests/download-chat-audio.sh` now prints instead of guessing with `tr`. | `internal/whatsapp/download.go`, `client.go`, `internal/api/handlers.go`, `tests/download-chat-audio.sh` |
+| **B8:** `NormalizeTimeFilter` converts `after`/`before` to the stored format (`YYYY-MM-DD HH:MM:SS+00:00`; all 9,850 audio timestamps use it). Accepts RFC 3339 with any offset, `YYYY-MM-DD HH:MM:SS` (UTC) or `YYYY-MM-DD`. An unrecognised value → 400 from the batch endpoint. | `internal/database/messages.go`, `handlers.go` |
+| Tests: `TestChatFolderKey` (pins the existing folder names), `TestNormalizeTimeFilter`, `TestListAudioMessagesTimeFilter` (the same instant in three formats selects the same rows). | `*_test.go` |
+
+**Verified live:**
+- A batch with `"chat":"972523996302"`, `after:"2026-09-15T00:00:00Z"`, `before:"2026-09-19T00:00:00Z"` → `total: 23`, matching a direct SQL count. `folder: media/972523996302`, `done: 3` (the 3 not yet downloaded, direct, no retry), `skipped: 20`.
+- `after:"yesterday"` → 400.
+- The group batch reports `media/972523531857-1556783116_g_us`, the existing folder. No new folders were created.
+- `index.json` for the target contact: `ok=27 rekeyed_on_phone=3`, 27 files. The chat's 20,095 `messages` rows are byte-identical to the original snapshot.
 
 ---
 
@@ -356,7 +370,7 @@ sudo sqlite3 "file:store/media.db?mode=ro" "SELECT status, COUNT(*) FROM media_d
 ### 5.6 Definition of done
 
 - [x] B1 documented as unrecoverable (§2.5) and recorded as `rekeyed_on_phone`; B2–B5 fixed
-- [ ] B6 fixed
+- [x] B6 fixed (and B8)
 - [ ] Before/after `diff` on the chat's rows is empty (new live rows excepted)
 - [ ] `quick_check` = `ok`, table list unchanged, `whatsapp.db` untouched except whatsmeow's own writes
 - [ ] Every item ends with an explicit status (`ok`, `rekeyed_on_phone`, `expired_not_on_phone`, `incomplete_metadata`; no leftover `failed`/`retry_timeout` after a re-run). *(Was "≥ 95 % ok"; not reachable because of B1: only ~11–19 days of media can be downloaded.)*

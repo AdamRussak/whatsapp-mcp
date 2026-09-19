@@ -216,3 +216,65 @@ func TestIsPermanentDownloadFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestListAudioMessagesTimeFilter(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("Failed to create MessageStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.StoreChat("c@s.whatsapp.net", "C", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	key := make([]byte, 32)
+	for i, ts := range []string{"2026-01-01T09:00:00Z", "2026-01-01T15:00:00Z", "2026-01-02T09:00:00Z"} {
+		at, _ := time.Parse(time.RFC3339, ts)
+		id := string(rune('A' + i))
+		if err := store.StoreMessage(id, "c@s.whatsapp.net", "1", "", at, false,
+			"audio", "a.ogg", "https://mmg.whatsapp.net/v/x.enc", key, key, key, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Same instant written three ways must select the same rows. Before normalization,
+	// "2026-01-01T12:00:00Z" compared as text sorted after every stored "2026-01-01 ..." value.
+	for _, after := range []string{"2026-01-01T12:00:00Z", "2026-01-01 12:00:00", "2026-01-01T14:00:00+02:00"} {
+		list, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, after, "", 0)
+		if err != nil {
+			t.Fatalf("after=%q: %v", after, err)
+		}
+		if len(list) != 2 || list[0].ID != "C" || list[1].ID != "B" {
+			t.Errorf("after=%q: got %d rows %+v, want C, B", after, len(list), list)
+		}
+	}
+
+	list, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, "", "2026-01-02", 0)
+	if err != nil || len(list) != 2 {
+		t.Errorf("before=2026-01-02: got %d rows, err %v; want 2", len(list), err)
+	}
+
+	if _, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, "yesterday", "", 0); err == nil {
+		t.Error("invalid after: expected error")
+	}
+}
+
+func TestNormalizeTimeFilter(t *testing.T) {
+	cases := map[string]string{
+		"":                          "",
+		"2026-01-01":                "2026-01-01 00:00:00+00:00",
+		"2026-01-01T12:30:00Z":      "2026-01-01 12:30:00+00:00",
+		"2026-01-01T14:30:00+02:00": "2026-01-01 12:30:00+00:00",
+		"2026-01-01 12:30:00":       "2026-01-01 12:30:00+00:00",
+		"2026-01-01 12:30:00+00:00": "2026-01-01 12:30:00+00:00",
+	}
+	for in, want := range cases {
+		got, err := NormalizeTimeFilter(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeTimeFilter(%q) = (%q, %v), want %q", in, got, err, want)
+		}
+	}
+	if _, err := NormalizeTimeFilter("31/12/2026"); err == nil {
+		t.Error("expected error for unsupported format")
+	}
+}
