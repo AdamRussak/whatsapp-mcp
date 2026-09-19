@@ -76,7 +76,7 @@ Order: **Milestone 1 → Phase 0 → Phase 1 + Phase 5 → Phases 2/3 → Phase 
    - Also try the upgraded whatsmeow (Phase 0) on a copy: its retry/media changes may matter here.
 4. ✅ **Fix B2, B3, B5** (and B4, B7, the `index.json` overwrite; see §2.6) (make the job resumable and honest): map `ErrMediaNotAvailableOnPhone` / `NOT_FOUND` to `expired_not_on_phone`; on startup mark leftover `running` jobs `interrupted`; use `MEDIA_RETRY_TIMEOUT_S`.
 5. ✅ **Fix B6, B8** (B4, B7 done in step 4). See §2.7: cancel only `running` jobs (404 otherwise); compute the folder key once per job in one function and return it in the batch response; gate placeholder resend behind a flag, don't swallow unmatched/duplicate events; normalise `after`/`before` to the stored format.
-6. **Missing tests**: LID expansion, cache hit, retry waiter (fake `events.MediaRetry`), "no writes to `messages`" (wrap the DB with a driver that fails on any non-`SELECT`).
+6. ✅ **Missing tests**: LID expansion, cache hit, retry waiter (fake `events.MediaRetry`), "no writes to `messages`". See §2.8.
 7. **Execute §5.5**: baseline dump → `store-test` rehearsal (limit 20) → live run on `972523996302` → after-run diff. Tick §5.6.
 8. Then **Phase 0** (pin `mcp[cli]<2` first — cheapest, prevents a broken rebuild).
 
@@ -146,6 +146,20 @@ CDN links last between 11 and 19 days. Anything older depends on media retry.
 - `after:"yesterday"` → 400.
 - The group batch reports `media/972523531857-1556783116_g_us`, the existing folder. No new folders were created.
 - `index.json` for the target contact: `ok=27 rekeyed_on_phone=3`, 27 files. The chat's 20,095 `messages` rows are byte-identical to the original snapshot.
+
+### 2.8 Missing tests added (2026-09-19)
+
+All use `t.TempDir()`; none touches `store/`. The bridge suite is now 31 tests, all passing.
+
+| Test | Covers |
+|---|---|
+| `TestResolveChatJIDs`, `TestResolveChatJIDsWithoutSessionDB` (`internal/whatsapp/lid_test.go`) | Phone number (plain and formatted), phone JID, device suffix, LID → phone, unmapped LID/phone, group, broadcast, invalid input. Uses a temp `whatsapp.db` with whatsmeow's real `whatsmeow_lid_map` schema. With no session DB, the input comes back unchanged and no file is created. |
+| `TestDownloadMediaCacheHitOnDisk`, `…CacheHitFromRecord`, `…IncompleteMetadata`, `…RejectsNonAudio` (`download_flow_test.go`) | The cache paths and the metadata check return without network access. The `Client` has no WhatsApp connection, so any network call would panic. Missing key → `incomplete_metadata` (permanent). Text or unknown message → error, nothing recorded. |
+| `TestMediaRetryWaiter`, `TestMediaRetryTimeoutDefault` | The event reaches only its own waiter. A duplicate on a full buffer doesn't block the whatsmeow event loop. Unregistered or `nil` events are dropped. Timeout defaults to 30 s and can be set. |
+| `TestDownloadQueriesAreReadOnly` (`internal/database/readonly_guard_test.go`) | Runtime guard: switches the store's single connection to SQLite `query_only` and confirms a real write is rejected. `GetMediaInfo` and `ListAudioMessages` (with date filters) still work, so they issue no writes or DDL. |
+| `TestDownloadCodeOnlyReadsMessages` (`download_guard_test.go`) | Source guard: parses the download code (`download.go`, `lid.go`, `media_decrypt.go`, `server.go`, the 6 download handlers) and fails on any `messageStore` call other than `GetMediaInfo`/`ListAudioMessages`, or any `db` call other than `Query`/`QueryRow` inside those two. Checked that it fails when a `StoreMessage` call is injected into `runBatchDownload`. |
+
+Found while writing them: `StoreMessage` silently skips a message with no content and no media, so a guard check using such a message proves nothing. The test uses a message with content.
 
 ---
 
@@ -376,7 +390,7 @@ sudo sqlite3 "file:store/media.db?mode=ro" "SELECT status, COUNT(*) FROM media_d
 - [ ] Every item ends with an explicit status (`ok`, `rekeyed_on_phone`, `expired_not_on_phone`, `incomplete_metadata`; no leftover `failed`/`retry_timeout` after a re-run). *(Was "≥ 95 % ok"; not reachable because of B1: only ~11–19 days of media can be downloaded.)*
 - [x] Re-running the job downloads nothing new (verified on a 20-item batch, 2026-09-19)
 - [x] Tests: direct-path extraction (real URL shape), path sanitiser, media path guard
-- [ ] Tests: LID expansion, cache hit, retry waiter, "no writes to `messages`" driver
+- [x] Tests: LID expansion, cache hit, retry waiter, "no writes to `messages`" (runtime `query_only` + source guard)
 
 ---
 
