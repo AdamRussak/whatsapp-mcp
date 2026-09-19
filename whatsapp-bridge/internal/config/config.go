@@ -7,11 +7,11 @@ import (
 
 // Config holds application configuration
 type Config struct {
-	APIPort             int
-	StoreDir            string
-	DownloadPaceMs      int
-	MediaRetryTimeoutS  int
-	PublicBaseURL       string
+	APIPort            int
+	StoreDir           string
+	DownloadPaceMs     int
+	MediaRetryTimeoutS int
+	PublicBaseURL      string
 }
 
 // NewConfig creates a new configuration with default values and environment overrides

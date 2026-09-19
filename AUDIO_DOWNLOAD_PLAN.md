@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-19:** Milestone 1 code is written and deployed on branch `webhook` (uncommitted). Direct downloads of recent media work. Downloading media whose CDN link has expired **does not work yet** (see §2, B1). Phases 0 and 2–6 have not started.
+**Status as of 2026-09-19:** Milestone 1 code is written, deployed and committed on branch `webhook`. Voice notes up to ~11–19 days old download directly. Older media can't be recovered: the phone re-uploads it with a new key it doesn't send back (B1, §2.5). Those items are now recorded as `rekeyed_on_phone` and skipped (§2.6). Phases 0 and 2–6 have not started.
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -12,7 +12,7 @@ Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started 
 
 | # | Goal | Delivered by | Status |
 |---|---|---|---|
-| G1 | Download a single voice message (or any audio) on demand | Milestone 1 (`POST /api/download`) + Phase 3 MCP tool | 🟡 works for fresh media; expired media blocked by B1 |
+| G1 | Download a single voice message (or any audio) on demand | Milestone 1 (`POST /api/download`) + Phase 3 MCP tool | 🟡 works for media up to ~11–19 days old; older is unrecoverable (B1) |
 | G3 | Download past voice messages from one chat or group | Milestone 1 (batch job) → Phase 5 (by sender, history request) | 🟡 endpoint + job built; not yet run at scale |
 | G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | ❌ |
 
@@ -50,31 +50,88 @@ Order: **Milestone 1 → Phase 0 → Phase 1 + Phase 5 → Phases 2/3 → Phase 
 
 | ID | Sev | Issue | Where |
 |---|---|---|---|
-| B1 🐞 | **blocker** | After a successful media retry, download from the new direct path fails the ciphertext hash check on all hosts. The re-uploaded blob is not byte-identical to the original. Seen for `from_me` items (sender = own phone). | `downloadWithMediaRetry`, `download.go` |
-| B2 🐞 | high | `expired_not_on_phone` is never recorded: a decrypt error on the notification `continue`s until the 30 s timeout, and a `NOT_FOUND` result is saved as generic `failed`. Re-runs retry these forever at 30 s each. | `download.go` |
-| B3 🐞 | high | A job left `running` by a bridge restart blocks all new batches (409) forever. | `media_store.go`, `main.go` |
-| B4 🐞 | med | `DELETE /api/download/batch/{id}` marks any job `cancelled`, including finished or non-existent ones. | `handlers.go` |
-| B5 🐞 | med | `MEDIA_RETRY_TIMEOUT_S` is read but never used; retry timeout is hardcoded 30 s. Per-item timeout is 60 s in batch, 90 s single. | `config.go`, `download.go` |
+| B1 | **recorded, no fix known** | After a successful media retry, the phone uploads a copy **encrypted with a different media key**. The original key fails its MAC, so it can't be decrypted. See §2.5. ✅ Now recorded as `rekeyed_on_phone` and skipped on re-runs. | `downloadWithMediaRetry`, `download.go` |
+| B2 ✅ | high | *(fixed)* `expired_not_on_phone` is never recorded: a decrypt error on the notification `continue`s until the 30 s timeout, and a `NOT_FOUND` result is saved as generic `failed`. Re-runs retry these forever at 30 s each. | `download.go` |
+| B3 ✅ | high | *(fixed: `MarkInterruptedJobs` at startup)* A job left `running` by a bridge restart blocks all new batches (409) forever. | `media_store.go`, `main.go` |
+| B4 ✅ | med | *(fixed: `CancelJob` only touches running jobs, else 404)* `DELETE /api/download/batch/{id}` marks any job `cancelled`, including finished or non-existent ones. | `handlers.go` |
+| B5 ✅ | med | *(fixed: per-item timeouts are the retry timeout + 30 s (batch) / + 60 s (single))* `MEDIA_RETRY_TIMEOUT_S` is read but never used; retry timeout is hardcoded 30 s. Per-item timeout is 60 s in batch, 90 s single. | `config.go`, `download.go` |
 | B6 🐞 | med | Folder key is computed three different ways (`resolveTargetFolder`, `runBatchDownload`, `tr -cd` in the shell script). For an unmapped `@lid` or a group, `index.json` / the script's "Index file" line point at the wrong folder. `ResolveChatJIDs` also opens `whatsapp.db` once per message (~4,000× per batch). | `download.go`, `handlers.go`, `tests/download-chat-audio.sh` |
-| B7 🐞 | med | Placeholder-resend hack (out of scope): sends a `BuildUnavailableMessageRequest` peer message to the phone for **every** retried item, and `HandlePlaceholderMessage` swallows any matching `events.Message` so it is never stored or sent to webhooks (even when the channel is full). It has never fired (0 in logs). | `download.go`, `client.go`, `main.go` |
+| B7 ✅ | med | *(fixed: removed; every message goes through `HandleMessage` again)* Placeholder-resend hack (out of scope): sends a `BuildUnavailableMessageRequest` peer message to the phone for **every** retried item, and `HandlePlaceholderMessage` swallows any matching `events.Message` so it is never stored or sent to webhooks (even when the channel is full). It has never fired (0 in logs). | `download.go`, `client.go`, `main.go` |
 | B8 🐞 | low | `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
 | B9 | low | `MediaDownloader` is unused. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` flags `config.go`, `download.go` (and pre-existing `types.go`, `handlers.go`, two tests). Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
 | B10 | low | `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
 ### 2.4 Next steps (in order)
 
-1. **Decide on re-pairing** (S1 warning). Commit the current work on `webhook` so the fixes are not lost.
-2. **Measure the fresh-media rate after S2.** Run a batch of `limit: 20` on a chat with recent audio. Record how many succeed directly vs need a retry. This sets expectations for the full run.
-3. **Diagnose B1** (needs one media retry against your phone, so do it deliberately): fetch the raw blob from the fresh direct path without whatsmeow's hash check, then
+1. **Decide on re-pairing** (S1 warning). ✅ Work committed on `webhook` (`235988f`; `store/media/` added to `.gitignore`). Exposure check: Docker publishes 8080 on `0.0.0.0` and the host firewall accepts everything, so reachability depends on the Oracle VCN security list (not visible from the VM). The bridge keeps no HTTP access log, so there's no record of whether the file was fetched. ❓ Re-pairing: pending your decision.
+2. ✅ **Measure the fresh-media rate after S2.** Run a batch of `limit: 20` on a chat with recent audio. Record how many succeed directly vs need a retry. This sets expectations for the full run.
+   - **Result (2026-09-19 14:39 UTC, job `job_20260919_143919_283`):** `18674685612157@lid`, expanded to it plus `972523996302@s.whatsapp.net`. The 20 newest items (15–18 Sep; 8 from me, 12 from the contact): **20/20 `ok` in 9 s, 0 media retries**. 518,863 bytes total, all with an `OggS` header, `index.json` 20× `ok` in `store/media/972523996302/`.
+   - Integrity: the chat's 20,095 `messages` rows are byte-identical before/after; `quick_check` = `ok`.
+   - Idempotency: re-running the same job gives `skipped: 20`, `done: 0`, no new files.
+   - Takeaway: the direct path works for media up to at least 4 days old. How far back links stay valid is still unknown. The next batch should reach further back (e.g. `before: 2026-09-10`, limit 20) to find where direct downloads start failing. That boundary is where B1 matters.
+3. ✅ **Diagnose B1**. Result in §2.5: diagnosed, no fix with the current protocol. Original plan kept for reference: fetch the raw blob from the fresh direct path without whatsmeow's hash check, then
    - verify its HMAC and decrypt it with the **original** `media_key` (same code as `scripts/download_chat_audio.py`);
    - if HMAC + plaintext SHA-256 pass → add this as the post-retry fallback (plaintext hash still enforced, so integrity holds);
    - if HMAC fails → the phone re-encrypted with a new key; the only route is the placeholder resend (keep B7's path but fix it), or accept these as unrecoverable.
    - Also try the upgraded whatsmeow (Phase 0) on a copy: its retry/media changes may matter here.
-4. **Fix B2, B3, B5** (make the job resumable and honest): map `ErrMediaNotAvailableOnPhone` / `NOT_FOUND` to `expired_not_on_phone`; on startup mark leftover `running` jobs `interrupted`; use `MEDIA_RETRY_TIMEOUT_S`.
-5. **Fix B4, B6, B7, B8**: cancel only `running` jobs (404 otherwise); compute the folder key once per job in one function and return it in the batch response; gate placeholder resend behind a flag, don't swallow unmatched/duplicate events; normalise `after`/`before` to the stored format.
+4. ✅ **Fix B2, B3, B5** (and B4, B7, the `index.json` overwrite; see §2.6) (make the job resumable and honest): map `ErrMediaNotAvailableOnPhone` / `NOT_FOUND` to `expired_not_on_phone`; on startup mark leftover `running` jobs `interrupted`; use `MEDIA_RETRY_TIMEOUT_S`.
+5. **Fix B6, B8** (B4, B7 done in step 4): cancel only `running` jobs (404 otherwise); compute the folder key once per job in one function and return it in the batch response; gate placeholder resend behind a flag, don't swallow unmatched/duplicate events; normalise `after`/`before` to the stored format.
 6. **Missing tests**: LID expansion, cache hit, retry waiter (fake `events.MediaRetry`), "no writes to `messages`" (wrap the DB with a driver that fails on any non-`SELECT`).
 7. **Execute §5.5**: baseline dump → `store-test` rehearsal (limit 20) → live run on `972523996302` → after-run diff. Tick §5.6.
 8. Then **Phase 0** (pin `mcp[cli]<2` first — cheapest, prevents a broken rebuild).
+
+### 2.5 B1 investigation (2026-09-19, 14:58–15:03 UTC)
+
+**Link lifetime.** Single downloads from the target chat (`18674685612157@lid`), newest to oldest:
+
+| Item | Age | From | Result |
+|---|---|---|---|
+| `AC9DC47F…`, `ACC8615E…` | 7–8 days (11–12 Sep) | them, me | direct ✅ |
+| `AC6FD363…`, `ACD7806B…` | 11 days (8 Sep) | them, me | direct ✅ |
+| `AC9F58C8…`, `AC7A2751…` | 19–20 days (30–31 Aug) | me, them | 403/404/410 → retry → B1 ❌ |
+| `AC8AC1AE…` | 37 days (13 Aug) | me | 403/404/410 → retry → B1 ❌ |
+
+CDN links last between 11 and 19 days. Anything older depends on media retry.
+
+**What the retry returns** (3 items, both directions):
+- The phone answers `SUCCESS` with a fresh direct path in 1–2 s. The notification is AES-GCM encrypted with a key derived from **our** stored media key and decrypts fine, so the phone does hold the original key.
+- The protobuf has only the 4 known fields: no unknown fields, empty `messageSecret`. The newer whatsmeow (`20260917111002`) defines the same 4 fields.
+- The uploaded blob is exactly the expected size for the original plaintext: `file_length` padded to 16 bytes, plus the 10-byte MAC (26,038→26,058, 45,782→45,802, 10,248→10,266). So it's the same content.
+- Its ciphertext hash differs, and **its MAC fails with the original key** under every HKDF label (audio, image, video, document, sticker, thumbnail). Decrypting anyway doesn't produce `OggS`. So the phone re-encrypted it with a **different key**, and that key isn't in the notification.
+- The placeholder-resend request (B7) got no response within 20 s. The chat's 20,095 `messages` rows stayed byte-identical.
+- Known upstream: [Baileys #2714](https://github.com/WhiskeySockets/Baileys/issues/2714) reports re-keyed media-retry answers for LID-migrated chats. It was closed with no fix.
+
+**Code added** (kept; it's a safe, strictly verified fallback plus diagnostics):
+- `internal/whatsapp/media_decrypt.go`: `fetchRawMedia` and `decryptMediaBlob` (MAC with the original key, then plaintext SHA-256 must match). Test in `media_decrypt_test.go`; it caught an in-place decryption bug in `cbcutil.Decrypt`.
+- `downloadWithMediaRetry` now uses this fallback on a ciphertext-hash mismatch, logs the blob size, hashes and unknown proto fields, and fails immediately instead of waiting out the 30 s timeout.
+- On a failed retry, `media.db` stores the **fresh** direct path, so a re-upload can be re-examined offline (links last ~2 weeks). The probe script is not in the repo.
+
+**Consequence for Milestone 1:** with the current protocol, only voice notes from roughly the last 11–19 days can be downloaded. For the target contact that's a few dozen of 4,062. The ≥ 95 % goal in §5.6 isn't reachable for older history.
+
+**Options:**
+1. **Accept and record honestly (recommended now).** Add a status `rekeyed_on_phone` for this case. Skip it on re-runs unless `retry_failed=true`, and drop the placeholder peer request (B7), so no more requests go to phones for items that can't succeed. Change the §5.6 target to "every item has an explicit reason".
+2. **On-demand history sync** (Phase 5.2): `BuildHistorySyncRequest` makes the phone resend older messages. The resent messages may carry the phone's current key and path. Needs care: `HandleHistorySync` stores through `INSERT OR REPLACE`, which would rewrite rows. So capture keys into `media.db` instead of `messages`, or do §4.3 first. Uncertain payoff; test on one message.
+3. **Manual export from the phone** ("Export chat" → include media): gives all voice notes the phone still has, as `.opus` files. No protocol risk; one chat at a time; filenames don't carry message IDs.
+4. **Upstream:** report to whatsmeow with the evidence above. Upgrading whatsmeow alone won't help (same proto).
+
+**Decision (2026-09-19): option 1**, implemented in §2.6. Options 2–4 stay open.
+
+### 2.6 Failures recorded (2026-09-19, 15:22–15:28 UTC)
+
+| Change | Where |
+|---|---|
+| Status constants and `IsPermanentDownloadFailure` (`expired_not_on_phone`, `rekeyed_on_phone`, `incomplete_metadata`). Batch re-runs skip these unless `retry_failed=true`, so no retry request reaches a phone for them. | `internal/database/media_store.go`, `internal/api/handlers.go` |
+| `retryFailureStatus` classifies with `errors.Is`: MAC mismatch → `rekeyed_on_phone`; `ErrMediaNotAvailableOnPhone` or `NOT_FOUND` → `expired_not_on_phone` (immediately, not after the timeout); timeout → `retry_timeout`; anything else → `failed`. | `internal/whatsapp/download.go` |
+| Placeholder-resend peer request and waiter removed (B7). The retry wait is a single `select` with `MEDIA_RETRY_TIMEOUT_S` (B5). | `download.go`, `client.go`, `main.go` |
+| Leftover `running` jobs → `interrupted` at startup (B3). `DELETE` cancels only running jobs, 404 otherwise (B4). | `media_store.go`, `main.go`, `handlers.go` |
+| `index.json` is rebuilt from every audio message of the chat that has a `media.db` record, instead of only the current job's items (a 1-item job had shrunk it to 1 entry). | `handlers.go` `writeBatchIndexJSON` |
+| Tests: `TestRetryFailureStatus`, `TestIsPermanentDownloadFailure`, `TestJobInterruptAndCancel`. | `*_test.go` |
+
+**Existing records:** backed up `media.db` to `store/backups/media_20260919_152251.db`, then set the 3 rows with a proven MAC mismatch (`AC9F58C8…`, `AC7A2751…`, `AC8AC1AE…`) to `rekeyed_on_phone`. The 2 older rows showing only "hash of media ciphertext doesn't match" (`ACEEA1AA…`, `3A5E2DD4…` in `244332250583270@lid`, from before the MAC check existed) stay `failed`: likely B1, but unproven. The next run retries them once and records the verified status.
+
+**Verified live:** a batch covering only `AC9F58C8…` → `skipped: 1`, 0 retry requests. `DELETE` on a finished job → 404, status stays `completed`. `index.json` for `972523996302` → `ok=24 rekeyed_on_phone=3`, matching the 24 files. The chat's 20,095 `messages` rows are byte-identical to the snapshot taken before step 2.
+
+**`media.db` now:** `ok` 25 · `rekeyed_on_phone` 3 · `failed` 3 (2 unproven B1, 1 `context canceled`) · `retry_timeout` 1.
 
 ---
 
@@ -298,11 +355,12 @@ sudo sqlite3 "file:store/media.db?mode=ro" "SELECT status, COUNT(*) FROM media_d
 
 ### 5.6 Definition of done
 
-- [ ] B1 resolved or documented as unrecoverable; B2–B6 fixed
+- [x] B1 documented as unrecoverable (§2.5) and recorded as `rekeyed_on_phone`; B2–B5 fixed
+- [ ] B6 fixed
 - [ ] Before/after `diff` on the chat's rows is empty (new live rows excepted)
 - [ ] `quick_check` = `ok`, table list unchanged, `whatsapp.db` untouched except whatsmeow's own writes
-- [ ] ≥ 95 % of items whose sender's phone was online end `ok`; the rest have an explicit reason
-- [ ] Re-running the job downloads nothing new
+- [ ] Every item ends with an explicit status (`ok`, `rekeyed_on_phone`, `expired_not_on_phone`, `incomplete_metadata`; no leftover `failed`/`retry_timeout` after a re-run). *(Was "≥ 95 % ok"; not reachable because of B1: only ~11–19 days of media can be downloaded.)*
+- [x] Re-running the job downloads nothing new (verified on a 20-item batch, 2026-09-19)
 - [x] Tests: direct-path extraction (real URL shape), path sanitiser, media path guard
 - [ ] Tests: LID expansion, cache hit, retry waiter, "no writes to `messages`" driver
 

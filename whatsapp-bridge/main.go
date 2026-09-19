@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -40,12 +41,20 @@ func main() {
 	}
 	defer mediaStore.Close()
 
+	// A job still 'running' was cut off by a restart; without this it would block new batches
+	if n, err := mediaStore.MarkInterruptedJobs(); err != nil {
+		logger.Errorf("Failed to mark interrupted download jobs: %v", err)
+	} else if n > 0 {
+		logger.Warnf("Marked %d interrupted download job(s)", n)
+	}
+
 	// Create WhatsApp client
 	client, err := whatsapp.NewClient(logger)
 	if err != nil {
 		logger.Errorf("Failed to create WhatsApp client: %v", err)
 		return
 	}
+	client.SetMediaRetryTimeout(time.Duration(cfg.MediaRetryTimeoutS) * time.Second)
 
 	// Initialize webhook manager
 	webhookManager := webhook.NewManager(messageStore, logger)
@@ -59,11 +68,8 @@ func main() {
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			// If message was requested by a downloader waiter, pass it there first
-			if !client.HandlePlaceholderMessage(v) {
-				// Process regular messages with webhook support
-				client.HandleMessage(messageStore, webhookManager, v)
-			}
+			// Process regular messages with webhook support
+			client.HandleMessage(messageStore, webhookManager, v)
 
 		case *events.HistorySync:
 			// Process history sync events

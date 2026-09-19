@@ -19,9 +19,9 @@ import (
 // Client wraps the WhatsApp client with additional functionality
 type Client struct {
 	*whatsmeow.Client
-	logger              waLog.Logger
-	mediaRetries        sync.Map // messageID (string) -> chan *events.MediaRetry
-	placeholderMessages sync.Map // messageID (string) -> chan *events.Message
+	logger            waLog.Logger
+	mediaRetries      sync.Map // messageID (string) -> chan *events.MediaRetry
+	mediaRetryTimeout time.Duration
 }
 
 // NewClient creates a new WhatsApp client instance
@@ -197,33 +197,15 @@ func (c *Client) UnregisterMediaRetryWaiter(messageID string) {
 	c.mediaRetries.Delete(messageID)
 }
 
-// RegisterPlaceholderWaiter registers a listener channel for a message ID's placeholder resend
-func (c *Client) RegisterPlaceholderWaiter(messageID string) chan *events.Message {
-	ch := make(chan *events.Message, 1)
-	c.placeholderMessages.Store(messageID, ch)
-	return ch
+// SetMediaRetryTimeout sets how long a download waits for the phone to answer a media retry
+func (c *Client) SetMediaRetryTimeout(d time.Duration) {
+	c.mediaRetryTimeout = d
 }
 
-// UnregisterPlaceholderWaiter cleans up a placeholder waiter channel
-func (c *Client) UnregisterPlaceholderWaiter(messageID string) {
-	c.placeholderMessages.Delete(messageID)
-}
-
-// HandlePlaceholderMessage dispatches incoming placeholder resend Message events to waiting goroutines
-func (c *Client) HandlePlaceholderMessage(evt *events.Message) bool {
-	if evt == nil {
-		return false
+// MediaRetryTimeout returns the media retry wait, defaulting to 30 seconds
+func (c *Client) MediaRetryTimeout() time.Duration {
+	if c.mediaRetryTimeout <= 0 {
+		return defaultMediaRetryTimeout
 	}
-	msgID := string(evt.Info.ID)
-	if val, ok := c.placeholderMessages.Load(msgID); ok {
-		if ch, ok := val.(chan *events.Message); ok {
-			select {
-			case ch <- evt:
-				return true
-			default:
-				return true
-			}
-		}
-	}
-	return false
+	return c.mediaRetryTimeout
 }

@@ -10,6 +10,26 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// Download statuses stored in media_downloads.status
+const (
+	DownloadStatusOK                 = "ok"
+	DownloadStatusFailed             = "failed"               // transient; retried on the next run
+	DownloadStatusRetryTimeout       = "retry_timeout"        // phone didn't answer the media retry in time; retried
+	DownloadStatusNotOnPhone         = "expired_not_on_phone" // CDN copy expired and the phone no longer has the file
+	DownloadStatusRekeyedOnPhone     = "rekeyed_on_phone"     // phone re-uploaded with a media key we don't have
+	DownloadStatusIncompleteMetadata = "incomplete_metadata"  // messages.db lacks key, hashes or URL
+)
+
+// IsPermanentDownloadFailure reports whether a status can't change by retrying,
+// so batch re-runs skip it unless retry_failed is set.
+func IsPermanentDownloadFailure(status string) bool {
+	switch status {
+	case DownloadStatusNotOnPhone, DownloadStatusRekeyedOnPhone, DownloadStatusIncompleteMetadata:
+		return true
+	}
+	return false
+}
+
 // MediaDownloadRecord represents a media download result in media.db
 type MediaDownloadRecord struct {
 	MessageID    string     `json:"message_id"`
@@ -18,7 +38,7 @@ type MediaDownloadRecord struct {
 	SHA256       string     `json:"sha256"`
 	DirectPath   string     `json:"direct_path"`
 	DownloadedAt *time.Time `json:"downloaded_at"`
-	Status       string     `json:"status"` // 'ok', 'expired_not_on_phone', 'retry_timeout', 'failed', 'incomplete'
+	Status       string     `json:"status"` // one of the DownloadStatus* constants
 	Error        string     `json:"error"`
 }
 
@@ -185,6 +205,34 @@ func (s *MediaStore) FinishJob(id string, status string) error {
 		WHERE id = ?
 	`, status, now, id)
 	return err
+}
+
+// MarkInterruptedJobs marks jobs left 'running' by a previous process as 'interrupted'.
+// Call once at startup, before any batch can start; returns the number of jobs changed.
+func (s *MediaStore) MarkInterruptedJobs() (int64, error) {
+	res, err := s.db.Exec(`
+		UPDATE download_jobs
+		SET status = 'interrupted', finished_at = ?
+		WHERE status = 'running'
+	`, time.Now().UTC())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// CancelJob marks a running job as cancelled. It returns false if no running job has that ID.
+func (s *MediaStore) CancelJob(id string) (bool, error) {
+	res, err := s.db.Exec(`
+		UPDATE download_jobs
+		SET status = 'cancelled', finished_at = ?
+		WHERE id = ? AND status = 'running'
+	`, time.Now().UTC(), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // GetJob returns a download job by ID

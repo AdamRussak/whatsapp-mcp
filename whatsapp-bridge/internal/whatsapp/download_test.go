@@ -2,9 +2,11 @@ package whatsapp
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"whatsapp-bridge/internal/database"
 )
 
 func TestExtractDirectPathFromURL(t *testing.T) {
@@ -77,5 +79,24 @@ func TestIsExpiredMediaErr(t *testing.T) {
 	}
 	if isExpiredMediaErr(nil) {
 		t.Error("expected false for nil")
+	}
+}
+
+func TestRetryFailureStatus(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("re-uploaded media rejected: %w", errBlobMACMismatch), database.DownloadStatusRekeyedOnPhone},
+		{fmt.Errorf("media retry answer: %w", whatsmeow.ErrMediaNotAvailableOnPhone), database.DownloadStatusNotOnPhone},
+		{fmt.Errorf("media retry answer NOT_FOUND: %w", whatsmeow.ErrMediaNotAvailableOnPhone), database.DownloadStatusNotOnPhone},
+		{fmt.Errorf("%w after 30s", errMediaRetryTimeout), database.DownloadStatusRetryTimeout},
+		{fmt.Errorf("re-uploaded media rejected: %w", errBlobPlainMismatch), database.DownloadStatusFailed},
+		{errors.New("context deadline exceeded"), database.DownloadStatusFailed},
+	}
+	for _, c := range cases {
+		if got := retryFailureStatus(c.err); got != c.want {
+			t.Errorf("retryFailureStatus(%v) = %q, want %q", c.err, got, c.want)
+		}
 	}
 }

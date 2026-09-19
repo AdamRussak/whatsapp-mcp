@@ -154,3 +154,65 @@ func TestListAudioMessagesAndGetMediaInfo(t *testing.T) {
 		t.Fatalf("Expected M1, got %s", list[0].ID)
 	}
 }
+
+func TestJobInterruptAndCancel(t *testing.T) {
+	ms, err := NewMediaStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("Failed to create MediaStore: %v", err)
+	}
+	defer ms.Close()
+
+	for _, id := range []string{"stuck", "done"} {
+		if err := ms.CreateJob(&DownloadJob{ID: id, Status: "running", StartedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ms.FinishJob("done", "completed"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Startup cleanup: only the job left running changes, and nothing blocks new batches
+	n, err := ms.MarkInterruptedJobs()
+	if err != nil || n != 1 {
+		t.Fatalf("MarkInterruptedJobs = (%d, %v), want (1, nil)", n, err)
+	}
+	if job, _ := ms.GetJob("stuck"); job.Status != "interrupted" || job.FinishedAt == nil {
+		t.Errorf("stuck job = %+v, want interrupted with finished_at", job)
+	}
+	if active, _ := ms.GetActiveJob(); active != nil {
+		t.Errorf("GetActiveJob = %+v, want nil", active)
+	}
+
+	// Cancel only affects running jobs
+	if ok, err := ms.CancelJob("done"); ok || err != nil {
+		t.Errorf("CancelJob(completed) = (%v, %v), want (false, nil)", ok, err)
+	}
+	if job, _ := ms.GetJob("done"); job.Status != "completed" {
+		t.Errorf("completed job status changed to %q", job.Status)
+	}
+	if ok, _ := ms.CancelJob("missing"); ok {
+		t.Error("CancelJob(missing) = true, want false")
+	}
+	if err := ms.CreateJob(&DownloadJob{ID: "live", Status: "running", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := ms.CancelJob("live"); !ok || err != nil {
+		t.Errorf("CancelJob(running) = (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
+func TestIsPermanentDownloadFailure(t *testing.T) {
+	permanent := map[string]bool{
+		DownloadStatusOK:                 false,
+		DownloadStatusFailed:             false,
+		DownloadStatusRetryTimeout:       false,
+		DownloadStatusNotOnPhone:         true,
+		DownloadStatusRekeyedOnPhone:     true,
+		DownloadStatusIncompleteMetadata: true,
+	}
+	for status, want := range permanent {
+		if got := IsPermanentDownloadFailure(status); got != want {
+			t.Errorf("IsPermanentDownloadFailure(%q) = %v, want %v", status, got, want)
+		}
+	}
+}

@@ -14,10 +14,30 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waMmsRetry"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"whatsapp-bridge/internal/database"
 )
 
 var safeComponentRegex = regexp.MustCompile(`[^A-Za-z0-9_-]`)
+
+// defaultMediaRetryTimeout is used when SetMediaRetryTimeout was not called
+const defaultMediaRetryTimeout = 30 * time.Second
+
+var errMediaRetryTimeout = errors.New("media retry timed out")
+
+// retryFailureStatus maps a media-retry error to the status recorded in media.db
+func retryFailureStatus(err error) string {
+	switch {
+	case errors.Is(err, errBlobMACMismatch):
+		return database.DownloadStatusRekeyedOnPhone
+	case errors.Is(err, whatsmeow.ErrMediaNotAvailableOnPhone):
+		return database.DownloadStatusNotOnPhone
+	case errors.Is(err, errMediaRetryTimeout):
+		return database.DownloadStatusRetryTimeout
+	default:
+		return database.DownloadStatusFailed
+	}
+}
 
 // safePathComponent sanitizes a string to prevent directory traversal or invalid path characters
 func safePathComponent(s string) string {
@@ -151,7 +171,7 @@ func (c *Client) DownloadMedia(
 
 	// Also check if media.db already has a record with a valid local path
 	rec, err := mediaStore.GetDownload(messageID, chatJID)
-	if err == nil && rec != nil && rec.Status == "ok" && rec.LocalPath != "" {
+	if err == nil && rec != nil && rec.Status == database.DownloadStatusOK && rec.LocalPath != "" {
 		cachedFilePath := filepath.Join(storeDir, rec.LocalPath)
 		if fi, err := os.Stat(cachedFilePath); err == nil && fi.Size() > 0 {
 			cachedAbs, _ := filepath.Abs(cachedFilePath)
@@ -173,7 +193,7 @@ func (c *Client) DownloadMedia(
 		_ = mediaStore.RecordDownload(&database.MediaDownloadRecord{
 			MessageID: messageID,
 			ChatJID:   chatJID,
-			Status:    "incomplete_metadata",
+			Status:    database.DownloadStatusIncompleteMetadata,
 			Error:     "missing decryption key or hashes in database",
 		})
 		return nil, fmt.Errorf("incomplete decryption material for message %s", messageID)
@@ -184,7 +204,7 @@ func (c *Client) DownloadMedia(
 		_ = mediaStore.RecordDownload(&database.MediaDownloadRecord{
 			MessageID: messageID,
 			ChatJID:   chatJID,
-			Status:    "incomplete_metadata",
+			Status:    database.DownloadStatusIncompleteMetadata,
 			Error:     "missing direct_path / URL in database",
 		})
 		return nil, fmt.Errorf("no URL or direct_path available for message %s", messageID)
@@ -201,16 +221,16 @@ func (c *Client) DownloadMedia(
 			var retryPath string
 			data, retryPath, err = c.downloadWithMediaRetry(ctx, messageID, chatJID, info, whatsmeow.MediaAudio)
 			if err != nil {
-				status := "failed"
-				if errors.Is(err, whatsmeow.ErrMediaNotAvailableOnPhone) {
-					status = "expired_not_on_phone"
-				} else if strings.Contains(err.Error(), "timed out") {
-					status = "retry_timeout"
+				status := retryFailureStatus(err)
+				// Keep the fresh path from the retry (if any) so a failure can be re-examined
+				recordedPath := directPath
+				if retryPath != "" {
+					recordedPath = retryPath
 				}
 				_ = mediaStore.RecordDownload(&database.MediaDownloadRecord{
 					MessageID:  messageID,
 					ChatJID:    chatJID,
-					DirectPath: directPath,
+					DirectPath: recordedPath,
 					Status:     status,
 					Error:      err.Error(),
 				})
@@ -222,7 +242,7 @@ func (c *Client) DownloadMedia(
 				MessageID:  messageID,
 				ChatJID:    chatJID,
 				DirectPath: directPath,
-				Status:     "failed",
+				Status:     database.DownloadStatusFailed,
 				Error:      err.Error(),
 			})
 			return nil, fmt.Errorf("direct media download failed: %w", err)
@@ -237,7 +257,7 @@ func (c *Client) DownloadMedia(
 			MessageID:  messageID,
 			ChatJID:    chatJID,
 			DirectPath: finalDirectPath,
-			Status:     "failed",
+			Status:     database.DownloadStatusFailed,
 			Error:      err.Error(),
 		})
 		return nil, err
@@ -255,7 +275,7 @@ func (c *Client) DownloadMedia(
 		LocalPath:  relPath,
 		SHA256:     shaHex,
 		DirectPath: finalDirectPath,
-		Status:     "ok",
+		Status:     database.DownloadStatusOK,
 		Error:      "",
 	})
 
@@ -313,70 +333,57 @@ func (c *Client) downloadWithMediaRetry(
 	waiterCh := c.RegisterMediaRetryWaiter(messageID)
 	defer c.UnregisterMediaRetryWaiter(messageID)
 
-	placeholderCh := c.RegisterPlaceholderWaiter(messageID)
-	defer c.UnregisterPlaceholderWaiter(messageID)
-
-	c.logger.Infof("Initiating recovery for %s (chat=%s, sender=%s, is_from_me=%v)...",
+	c.logger.Infof("Requesting media retry for %s (chat=%s, sender=%s, is_from_me=%v)",
 		messageID, chat, sender, info.IsFromMe)
-
-	// Send placeholder message resend request to primary phone (peer message)
-	peerReq := c.Client.BuildUnavailableMessageRequest(chat, sender, messageID)
-	sendResp, peerErr := c.Client.SendPeerMessage(ctx, peerReq)
-	c.logger.Infof("Sent BuildUnavailableMessageRequest for %s (peerErr: %v, sendResp: %+v)", messageID, peerErr, sendResp)
-
-	// Send media retry receipt (server-error receipt)
-	retryErr := c.Client.SendMediaRetryReceipt(ctx, msgInfo, info.MediaKey)
-	c.logger.Infof("Sent SendMediaRetryReceipt for %s (retryErr: %v)", messageID, retryErr)
-
-	timeout := 30 * time.Second
-	deadline := time.After(timeout)
-
-	var lastDirectPath string
-	for {
-		select {
-		case placeholderEvt := <-placeholderCh:
-			c.logger.Infof("Placeholder message resend received for %s! EvtID: %s, UnavailableReqID: %s",
-				messageID, placeholderEvt.Info.ID, placeholderEvt.UnavailableRequestID)
-			if placeholderEvt.Message != nil {
-				if aud := placeholderEvt.Message.GetAudioMessage(); aud != nil {
-					c.logger.Infof("Placeholder contains AudioMessage! DirectPath: %s, MediaKey: %x, FileEncSHA: %x, FileSHA: %x",
-						aud.GetDirectPath(), aud.GetMediaKey(), aud.GetFileEncSHA256(), aud.GetFileSHA256())
-					data, err := c.Client.Download(ctx, aud)
-					if err == nil && len(data) > 0 {
-						return data, aud.GetDirectPath(), nil
-					}
-					c.logger.Warnf("Download using placeholder AudioMessage failed: %v", err)
-				}
-			}
-
-		case evt := <-waiterCh:
-			notif, err := whatsmeow.DecryptMediaRetryNotification(evt, info.MediaKey)
-			if err != nil {
-				c.logger.Warnf("Failed to decrypt media retry notification for %s: %v", messageID, err)
-				continue
-			}
-			if notif.GetResult() != waMmsRetry.MediaRetryNotification_SUCCESS {
-				return nil, "", fmt.Errorf("media retry result was not successful: %v", notif.GetResult())
-			}
-
-			lastDirectPath = notif.GetDirectPath()
-			msgSec := notif.GetMessageSecret()
-			c.logger.Infof("Media retry notification SUCCESS for %s! Fresh direct path: %s, StanzaID: %s, MsgSec len: %d",
-				messageID, lastDirectPath, notif.GetStanzaID(), len(msgSec))
-
-			// Try downloading with whatsmeow DownloadMediaWithPath
-			data, err := c.Client.DownloadMediaWithPath(ctx, lastDirectPath, info.FileEncSHA256, info.FileSHA256, info.MediaKey, waType, "", false)
-			if err == nil && len(data) > 0 {
-				return data, lastDirectPath, nil
-			}
-			c.logger.Warnf("Download using media retry direct path with original FileEncSHA256 failed: %v", err)
-
-		case <-deadline:
-			return nil, lastDirectPath, fmt.Errorf("media recovery timed out after %v", timeout)
-
-		case <-ctx.Done():
-			return nil, lastDirectPath, ctx.Err()
-		}
+	if err := c.Client.SendMediaRetryReceipt(ctx, msgInfo, info.MediaKey); err != nil {
+		return nil, "", fmt.Errorf("failed to send media retry receipt: %w", err)
 	}
-}
 
+	timeout := c.MediaRetryTimeout()
+	var evt *events.MediaRetry
+	select {
+	case evt = <-waiterCh:
+	case <-time.After(timeout):
+		return nil, "", fmt.Errorf("%w after %v (phone offline?)", errMediaRetryTimeout, timeout)
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	}
+
+	// ErrMediaNotAvailableOnPhone comes back from here when the phone no longer has the file
+	notif, err := whatsmeow.DecryptMediaRetryNotification(evt, info.MediaKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("media retry answer: %w", err)
+	}
+	switch notif.GetResult() {
+	case waMmsRetry.MediaRetryNotification_SUCCESS:
+	case waMmsRetry.MediaRetryNotification_NOT_FOUND:
+		return nil, "", fmt.Errorf("media retry answer NOT_FOUND: %w", whatsmeow.ErrMediaNotAvailableOnPhone)
+	default:
+		return nil, "", fmt.Errorf("media retry answer: %v", notif.GetResult())
+	}
+
+	freshPath := notif.GetDirectPath()
+	c.logger.Infof("Media retry for %s succeeded; fresh direct path received", messageID)
+
+	data, err := c.Client.DownloadMediaWithPath(ctx, freshPath, info.FileEncSHA256, info.FileSHA256, info.MediaKey, waType, "", false)
+	if err == nil {
+		return data, freshPath, nil
+	}
+	if !errors.Is(err, whatsmeow.ErrInvalidMediaEncSHA256) {
+		return nil, freshPath, fmt.Errorf("download using refreshed direct path failed: %w", err)
+	}
+
+	// The re-upload's ciphertext differs from the original. Fetch it without the ciphertext
+	// hash check and verify it with the original media key instead: the MAC and the
+	// plaintext SHA256 must both match. In practice (see AUDIO_DOWNLOAD_PLAN.md §2.5) the
+	// phone re-encrypts with a new key it doesn't send back, so this ends in errBlobMACMismatch.
+	blob, err := fetchRawMedia(ctx, freshPath)
+	if err != nil {
+		return nil, freshPath, fmt.Errorf("raw fetch of refreshed direct path failed: %w", err)
+	}
+	data, err = decryptMediaBlob(blob, info.MediaKey, info.FileSHA256, waType)
+	if err != nil {
+		return nil, freshPath, fmt.Errorf("re-uploaded media rejected: %w", err)
+	}
+	return data, freshPath, nil
+}

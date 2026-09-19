@@ -323,7 +323,7 @@ func (s *Server) handleDownloadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), s.client.MediaRetryTimeout()+60*time.Second)
 	defer cancel()
 
 	res, err := s.client.DownloadMedia(ctx, s.mediaStore, s.messageStore, req.MessageID, req.ChatJID, s.storeDir)
@@ -472,7 +472,7 @@ func (s *Server) runBatchDownload(
 		}
 
 		rec, _ := s.mediaStore.GetDownload(msg.ID, msg.ChatJID)
-		if skipCached && rec != nil && rec.Status == "ok" && rec.LocalPath != "" {
+		if skipCached && rec != nil && rec.Status == database.DownloadStatusOK && rec.LocalPath != "" {
 			fullPath := filepath.Join(s.storeDir, rec.LocalPath)
 			if fi, err := os.Stat(fullPath); err == nil && fi.Size() > 0 {
 				skipped++
@@ -481,13 +481,15 @@ func (s *Server) runBatchDownload(
 			}
 		}
 
-		if !retryFailed && rec != nil && (rec.Status == "expired_not_on_phone" || rec.Status == "incomplete_metadata") {
+		// Permanent failures (not on phone, re-keyed on phone, incomplete metadata) can't
+		// succeed on a re-run; skip them so no retry request reaches a phone again
+		if !retryFailed && rec != nil && database.IsPermanentDownloadFailure(rec.Status) {
 			skipped++
 			_ = s.mediaStore.UpdateJobProgress(jobID, done, failed, skipped, msg.ID)
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), s.client.MediaRetryTimeout()+30*time.Second)
 		_, err = s.client.DownloadMedia(ctx, s.mediaStore, s.messageStore, msg.ID, msg.ChatJID, s.storeDir)
 		cancel()
 
@@ -502,13 +504,20 @@ func (s *Server) runBatchDownload(
 	}
 
 	// Write index.json at end
-	s.writeBatchIndexJSON(outDir, messages)
+	s.writeBatchIndexJSON(outDir, resolvedJIDs)
 
 	_ = s.mediaStore.FinishJob(jobID, "completed")
 }
 
-// writeBatchIndexJSON builds an index.json summary in the chat's media directory
-func (s *Server) writeBatchIndexJSON(outDir string, messages []database.MediaInfo) {
+// writeBatchIndexJSON rebuilds index.json in the chat's media directory from every audio
+// message of the chat that has a media.db record, so earlier jobs' results are kept
+func (s *Server) writeBatchIndexJSON(outDir string, chatJIDs []string) {
+	messages, err := s.messageStore.ListAudioMessages(chatJIDs, "", "", 0)
+	if err != nil {
+		fmt.Printf("Failed to list audio messages for index.json: %v\n", err)
+		return
+	}
+
 	type IndexEntry struct {
 		MessageID string `json:"message_id"`
 		ChatJID   string `json:"chat_jid"`
@@ -521,26 +530,25 @@ func (s *Server) writeBatchIndexJSON(outDir string, messages []database.MediaInf
 		Error     string `json:"error,omitempty"`
 	}
 
-	var entries []IndexEntry
+	entries := []IndexEntry{}
 	for _, msg := range messages {
 		rec, _ := s.mediaStore.GetDownload(msg.ID, msg.ChatJID)
+		if rec == nil {
+			continue // never attempted
+		}
 		entry := IndexEntry{
 			MessageID: msg.ID,
 			ChatJID:   msg.ChatJID,
 			Timestamp: msg.Timestamp.UTC().Format("2006-01-02 15:04:05+00:00"),
 			FromMe:    msg.IsFromMe,
-			Status:    "unknown",
+			Status:    rec.Status,
+			SHA256:    rec.SHA256,
+			Error:     rec.Error,
 		}
-		if rec != nil {
-			entry.Status = rec.Status
-			entry.SHA256 = rec.SHA256
-			entry.Error = rec.Error
-			if rec.LocalPath != "" {
-				entry.File = filepath.Base(rec.LocalPath)
-				fullPath := filepath.Join(s.storeDir, rec.LocalPath)
-				if fi, err := os.Stat(fullPath); err == nil {
-					entry.Bytes = fi.Size()
-				}
+		if rec.LocalPath != "" {
+			entry.File = filepath.Base(rec.LocalPath)
+			if fi, err := os.Stat(filepath.Join(s.storeDir, rec.LocalPath)); err == nil {
+				entry.Bytes = fi.Size()
 			}
 		}
 		entries = append(entries, entry)
@@ -579,8 +587,13 @@ func (s *Server) handleBatchJobByID(w http.ResponseWriter, r *http.Request) {
 		SendJSON(w, job)
 
 	case http.MethodDelete:
-		if err := s.mediaStore.FinishJob(jobID, "cancelled"); err != nil {
+		cancelled, err := s.mediaStore.CancelJob(jobID)
+		if err != nil {
 			SendJSONError(w, fmt.Sprintf("Failed to cancel job: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if !cancelled {
+			SendJSONError(w, "no running job with that ID", http.StatusNotFound)
 			return
 		}
 		SendJSON(w, map[string]interface{}{
