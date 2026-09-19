@@ -1,5 +1,10 @@
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 claude_desktop_config.json
 whatsapp.log
 whatsapp-bridge/whatsapp-bridge
+store-test/
+store/backups/
+store/media/

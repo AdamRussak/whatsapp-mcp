@@ -1,7 +1,10 @@
 package database
 
 import (
+	"database/sql"
+	"strings"
 	"time"
+
 	"whatsapp-bridge/internal/types"
 )
 
@@ -108,4 +111,125 @@ func (store *MessageStore) GetPollOptionName(pollID, optionHash string) (string,
 	var name string
 	err := store.db.QueryRow("SELECT option_name FROM poll_options WHERE poll_id = ? AND option_hash = ?", pollID, optionHash).Scan(&name)
 	return name, err
+}
+
+// MediaInfo holds metadata for a media message in messages.db
+type MediaInfo struct {
+	ID            string    `json:"id"`
+	ChatJID       string    `json:"chat_jid"`
+	Sender        string    `json:"sender"`
+	Content       string    `json:"content"`
+	Timestamp     time.Time `json:"timestamp"`
+	IsFromMe      bool      `json:"is_from_me"`
+	MediaType     string    `json:"media_type"`
+	Filename      string    `json:"filename"`
+	URL           string    `json:"url"`
+	MediaKey      []byte    `json:"-"`
+	FileSHA256    []byte    `json:"-"`
+	FileEncSHA256 []byte    `json:"-"`
+	FileLength    uint64    `json:"file_length"`
+}
+
+// GetMediaInfo retrieves media information for a specific message by ID and chat JID (read-only)
+func (store *MessageStore) GetMediaInfo(id, chatJID string) (*MediaInfo, error) {
+	row := store.db.QueryRow(`
+		SELECT id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url,
+		       media_key, file_sha256, file_enc_sha256, file_length
+		FROM messages
+		WHERE id = ? AND chat_jid = ?
+	`, id, chatJID)
+
+	var info MediaInfo
+	var sender, content, filename, url sql.NullString
+	var fileLength sql.NullInt64
+
+	err := row.Scan(
+		&info.ID, &info.ChatJID, &sender, &content, &info.Timestamp, &info.IsFromMe,
+		&info.MediaType, &filename, &url, &info.MediaKey, &info.FileSHA256, &info.FileEncSHA256, &fileLength,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	info.Sender = sender.String
+	info.Content = content.String
+	info.Filename = filename.String
+	info.URL = url.String
+	if fileLength.Valid && fileLength.Int64 > 0 {
+		info.FileLength = uint64(fileLength.Int64)
+	}
+
+	return &info, nil
+}
+
+// ListAudioMessages lists audio messages across the given chat JIDs (read-only)
+func (store *MessageStore) ListAudioMessages(chatJIDs []string, after, before string, limit int) ([]MediaInfo, error) {
+	if len(chatJIDs) == 0 {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url,
+		       media_key, file_sha256, file_enc_sha256, file_length
+		FROM messages
+		WHERE media_type = 'audio' AND chat_jid IN (`
+
+	var placeholders []string
+	var args []interface{}
+	for _, jid := range chatJIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, jid)
+	}
+	query += strings.Join(placeholders, ",") + ")"
+
+	if after != "" {
+		query += " AND timestamp > ?"
+		args = append(args, after)
+	}
+	if before != "" {
+		query += " AND timestamp < ?"
+		args = append(args, before)
+	}
+
+	query += " ORDER BY timestamp DESC, id DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := store.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []MediaInfo
+	for rows.Next() {
+		var info MediaInfo
+		var sender, content, filename, url sql.NullString
+		var fileLength sql.NullInt64
+
+		err := rows.Scan(
+			&info.ID, &info.ChatJID, &sender, &content, &info.Timestamp, &info.IsFromMe,
+			&info.MediaType, &filename, &url, &info.MediaKey, &info.FileSHA256, &info.FileEncSHA256, &fileLength,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		info.Sender = sender.String
+		info.Content = content.String
+		info.Filename = filename.String
+		info.URL = url.String
+		if fileLength.Valid && fileLength.Int64 > 0 {
+			info.FileLength = uint64(fileLength.Int64)
+		}
+
+		result = append(result, info)
+	}
+
+	return result, rows.Err()
 }

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"whatsapp-bridge/internal/types"
 )
@@ -290,4 +292,47 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// MediaDownloader implements whatsmeow.DownloadableMessage for stored media metadata
+type MediaDownloader struct {
+	URL           string
+	DirectPath    string
+	MediaKey      []byte
+	FileLength    uint64
+	FileSHA256    []byte
+	FileEncSHA256 []byte
+	MediaType     whatsmeow.MediaType
+}
+
+func (d *MediaDownloader) GetDirectPath() string             { return d.DirectPath }
+func (d *MediaDownloader) GetURL() string                    { return d.URL }
+func (d *MediaDownloader) GetMediaKey() []byte               { return d.MediaKey }
+func (d *MediaDownloader) GetFileLength() uint64             { return d.FileLength }
+func (d *MediaDownloader) GetFileSHA256() []byte             { return d.FileSHA256 }
+func (d *MediaDownloader) GetFileEncSHA256() []byte          { return d.FileEncSHA256 }
+func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType { return d.MediaType }
+
+// ExtractDirectPathFromURL extracts the direct_path from a stored WhatsApp MMS URL.
+// The query string (ccb, oh, oe, _nc_sid) is part of the direct path: oh/oe authorize the
+// CDN request, and whatsmeow appends "&hash=..." to it. Only the URL-only mms3 flag is dropped.
+func ExtractDirectPathFromURL(url string) string {
+	parts := strings.SplitN(url, ".net/", 2)
+	if len(parts) < 2 {
+		return url
+	}
+	path, query, hasQuery := strings.Cut(parts[1], "?")
+	if !hasQuery {
+		return "/" + path
+	}
+	var kept []string
+	for _, param := range strings.Split(query, "&") {
+		if param != "" && param != "mms3=true" {
+			kept = append(kept, param)
+		}
+	}
+	if len(kept) == 0 {
+		return "/" + path
+	}
+	return "/" + path + "?" + strings.Join(kept, "&")
 }

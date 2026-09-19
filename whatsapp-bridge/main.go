@@ -32,6 +32,14 @@ func main() {
 	}
 	defer messageStore.Close()
 
+	// Initialize media store for download tracking (store/media.db)
+	mediaStore, err := database.NewMediaStore(cfg.StoreDir)
+	if err != nil {
+		logger.Errorf("Failed to initialize media store: %v", err)
+		return
+	}
+	defer mediaStore.Close()
+
 	// Create WhatsApp client
 	client, err := whatsapp.NewClient(logger)
 	if err != nil {
@@ -47,16 +55,23 @@ func main() {
 		return
 	}
 
-	// Setup event handling for messages and history sync
+	// Setup event handling for messages, history sync, and media retry
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
-			// Process regular messages with webhook support
-			client.HandleMessage(messageStore, webhookManager, v)
+			// If message was requested by a downloader waiter, pass it there first
+			if !client.HandlePlaceholderMessage(v) {
+				// Process regular messages with webhook support
+				client.HandleMessage(messageStore, webhookManager, v)
+			}
 
 		case *events.HistorySync:
 			// Process history sync events
 			client.HandleHistorySync(messageStore, v)
+
+		case *events.MediaRetry:
+			// Dispatch media retry responses to waiting downloaders
+			client.HandleMediaRetry(v)
 
 		case *events.Connected, *events.LoggedOut, *events.ClientOutdated, *events.ConnectFailure:
 			client.HandleConnectionEvent(context.Background(), v, os.Exit)
@@ -71,8 +86,8 @@ func main() {
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
-	// Start REST API server with webhook support
-	server := api.NewServer(client, messageStore, webhookManager, cfg.APIPort)
+	// Start REST API server with webhook and media download support
+	server := api.NewServer(client, messageStore, mediaStore, webhookManager, cfg.APIPort, cfg.StoreDir, cfg.DownloadPaceMs, cfg.PublicBaseURL)
 	server.Start()
 
 	// Create a channel to keep the main goroutine alive

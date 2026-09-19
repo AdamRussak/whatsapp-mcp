@@ -13,17 +13,34 @@ import (
 type Server struct {
 	client         *whatsapp.Client
 	messageStore   *database.MessageStore
+	mediaStore     *database.MediaStore
 	webhookManager *webhook.Manager
 	port           int
+	storeDir       string
+	paceMs         int
+	publicBaseURL  string
 }
 
 // NewServer creates a new API server instance
-func NewServer(client *whatsapp.Client, messageStore *database.MessageStore, webhookManager *webhook.Manager, port int) *Server {
+func NewServer(
+	client *whatsapp.Client,
+	messageStore *database.MessageStore,
+	mediaStore *database.MediaStore,
+	webhookManager *webhook.Manager,
+	port int,
+	storeDir string,
+	paceMs int,
+	publicBaseURL string,
+) *Server {
 	return &Server{
 		client:         client,
 		messageStore:   messageStore,
+		mediaStore:     mediaStore,
 		webhookManager: webhookManager,
 		port:           port,
+		storeDir:       storeDir,
+		paceMs:         paceMs,
+		publicBaseURL:  publicBaseURL,
 	}
 }
 
@@ -48,6 +65,12 @@ func (s *Server) Start() {
 func (s *Server) registerHandlers() {
 	// Message sending endpoint
 	http.HandleFunc("/api/send", CorsMiddleware(s.handleSendMessage))
+
+	// Media download endpoints
+	http.HandleFunc("/api/download", CorsMiddleware(s.handleDownloadMedia))
+	http.HandleFunc("/api/download/batch", CorsMiddleware(s.handleDownloadBatch))
+	http.HandleFunc("/api/download/batch/", CorsMiddleware(s.handleBatchJobByID))
+	http.HandleFunc("/api/media/", CorsMiddleware(s.handleServeMedia))
 
 	// Webhook management endpoints
 	http.HandleFunc("/api/webhooks", CorsMiddleware(s.handleWebhooks))

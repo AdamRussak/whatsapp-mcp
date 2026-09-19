@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -13,15 +14,30 @@ type MessageStore struct {
 	db *sql.DB
 }
 
-// NewMessageStore initializes a new message store with SQLite database
+// NewMessageStore initializes a new message store with SQLite database using STORE_DIR or default "store"
 func NewMessageStore() (*MessageStore, error) {
+	storeDir := os.Getenv("STORE_DIR")
+	if storeDir == "" {
+		storeDir = "store"
+	}
+	return NewMessageStoreWithDir(storeDir)
+}
+
+// NewMessageStoreWithDir initializes a message store in the specified directory
+func NewMessageStoreWithDir(storeDir string) (*MessageStore, error) {
+	if storeDir == "" {
+		storeDir = "store"
+	}
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
+	dbPath := filepath.Join(storeDir, "messages.db")
+	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_busy_timeout=5000", dbPath)
+
 	// Open SQLite database for messages with 5s busy timeout
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}

@@ -37,3 +37,9 @@ func SendJSONSuccess(w http.ResponseWriter, data interface{}, message string) {
 	}
 	json.NewEncoder(w).Encode(response)
 }
+
+// SendJSON sends any data encoded as JSON with 200 OK
+func SendJSON(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}

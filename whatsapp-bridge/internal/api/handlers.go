@@ -1,12 +1,18 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
+	"whatsapp-bridge/internal/database"
 	"whatsapp-bridge/internal/types"
+	"whatsapp-bridge/internal/whatsapp"
 )
 
 // handleSendMessage handles the message sending API endpoint
@@ -299,4 +305,348 @@ func (s *Server) handleWebhookLogs(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"data":    logs,
 	})
+}
+
+// handleDownloadMedia handles single message media download (POST /api/download)
+func (s *Server) handleDownloadMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		MessageID string `json:"message_id"`
+		ChatJID   string `json:"chat_jid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MessageID == "" || req.ChatJID == "" {
+		SendJSONError(w, "message_id and chat_jid are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	res, err := s.client.DownloadMedia(ctx, s.mediaStore, s.messageStore, req.MessageID, req.ChatJID, s.storeDir)
+	if err != nil {
+		SendJSONError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	SendJSON(w, map[string]interface{}{
+		"success":      true,
+		"path":         res.Path,
+		"abs_path":     res.AbsPath,
+		"filename":     res.Filename,
+		"media_type":   res.MediaType,
+		"mimetype":     res.Mimetype,
+		"cached":       res.Cached,
+		"size":         res.Size,
+		"sha256":       res.SHA256,
+		"download_url": s.publicBaseURL + "/api/media/" + strings.TrimPrefix(filepath.ToSlash(res.Path), "media/"),
+	})
+}
+
+// BatchDownloadRequest defines options for POST /api/download/batch
+type BatchDownloadRequest struct {
+	Chat        string `json:"chat"`
+	MediaType   string `json:"media_type"`
+	After       string `json:"after"`
+	Before      string `json:"before"`
+	Limit       int    `json:"limit"`
+	SkipCached  *bool  `json:"skip_cached"`
+	RetryFailed bool   `json:"retry_failed"`
+}
+
+// handleDownloadBatch starts an asynchronous batch download job (POST /api/download/batch)
+func (s *Server) handleDownloadBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req BatchDownloadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Chat) == "" {
+		SendJSONError(w, "chat identifier is required", http.StatusBadRequest)
+		return
+	}
+
+	// Only 1 batch job at a time
+	if activeJob, _ := s.mediaStore.GetActiveJob(); activeJob != nil {
+		SendJSONError(w, fmt.Sprintf("A batch download job (%s) is already running", activeJob.ID), http.StatusConflict)
+		return
+	}
+
+	limit := req.Limit
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
+	}
+
+	skipCached := true
+	if req.SkipCached != nil {
+		skipCached = *req.SkipCached
+	}
+
+	resolvedJIDs, err := whatsapp.ResolveChatJIDs(req.Chat, s.storeDir)
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to resolve chat JIDs: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	messages, err := s.messageStore.ListAudioMessages(resolvedJIDs, req.After, req.Before, limit)
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to list audio messages: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	jobID := fmt.Sprintf("job_%s_%03d", time.Now().UTC().Format("20060102_150405"), time.Now().UnixNano()%1000)
+	reqJSON, _ := json.Marshal(req)
+
+	job := &database.DownloadJob{
+		ID:        jobID,
+		Params:    string(reqJSON),
+		Status:    "running",
+		Total:     len(messages),
+		StartedAt: time.Now().UTC(),
+	}
+	if err := s.mediaStore.CreateJob(job); err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to create download job: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Run job in background
+	go s.runBatchDownload(jobID, req.Chat, resolvedJIDs, messages, skipCached, req.RetryFailed)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"job_id":        jobID,
+		"chat":          req.Chat,
+		"resolved_jids": resolvedJIDs,
+		"total":         len(messages),
+		"status_url":    s.publicBaseURL + "/api/download/batch/" + jobID,
+	})
+}
+
+// runBatchDownload executes the batch download sequentially with pace control
+func (s *Server) runBatchDownload(
+	jobID, chat string,
+	resolvedJIDs []string,
+	messages []database.MediaInfo,
+	skipCached, retryFailed bool,
+) {
+	done := 0
+	failed := 0
+	skipped := 0
+
+	pace := time.Duration(s.paceMs) * time.Millisecond
+	if pace <= 0 {
+		pace = 250 * time.Millisecond
+	}
+
+	folderKey := chat
+	if !strings.HasSuffix(chat, "@g.us") {
+		for _, j := range resolvedJIDs {
+			if strings.HasSuffix(j, "@s.whatsapp.net") {
+				folderKey = strings.SplitN(j, "@", 2)[0]
+				break
+			}
+		}
+	}
+	folderKey = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, folderKey)
+
+	outDir := filepath.Join(s.storeDir, "media", folderKey)
+	_ = os.MkdirAll(outDir, 0755)
+
+	for _, msg := range messages {
+		// Check cancellation
+		curJob, err := s.mediaStore.GetJob(jobID)
+		if err != nil || curJob == nil || curJob.Status == "cancelled" {
+			_ = s.mediaStore.FinishJob(jobID, "cancelled")
+			return
+		}
+
+		rec, _ := s.mediaStore.GetDownload(msg.ID, msg.ChatJID)
+		if skipCached && rec != nil && rec.Status == "ok" && rec.LocalPath != "" {
+			fullPath := filepath.Join(s.storeDir, rec.LocalPath)
+			if fi, err := os.Stat(fullPath); err == nil && fi.Size() > 0 {
+				skipped++
+				_ = s.mediaStore.UpdateJobProgress(jobID, done, failed, skipped, msg.ID)
+				continue
+			}
+		}
+
+		if !retryFailed && rec != nil && (rec.Status == "expired_not_on_phone" || rec.Status == "incomplete_metadata") {
+			skipped++
+			_ = s.mediaStore.UpdateJobProgress(jobID, done, failed, skipped, msg.ID)
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, err = s.client.DownloadMedia(ctx, s.mediaStore, s.messageStore, msg.ID, msg.ChatJID, s.storeDir)
+		cancel()
+
+		if err != nil {
+			failed++
+		} else {
+			done++
+		}
+		_ = s.mediaStore.UpdateJobProgress(jobID, done, failed, skipped, msg.ID)
+
+		time.Sleep(pace)
+	}
+
+	// Write index.json at end
+	s.writeBatchIndexJSON(outDir, messages)
+
+	_ = s.mediaStore.FinishJob(jobID, "completed")
+}
+
+// writeBatchIndexJSON builds an index.json summary in the chat's media directory
+func (s *Server) writeBatchIndexJSON(outDir string, messages []database.MediaInfo) {
+	type IndexEntry struct {
+		MessageID string `json:"message_id"`
+		ChatJID   string `json:"chat_jid"`
+		Timestamp string `json:"timestamp"`
+		FromMe    bool   `json:"from_me"`
+		File      string `json:"file,omitempty"`
+		Status    string `json:"status"`
+		Bytes     int64  `json:"bytes,omitempty"`
+		SHA256    string `json:"sha256,omitempty"`
+		Error     string `json:"error,omitempty"`
+	}
+
+	var entries []IndexEntry
+	for _, msg := range messages {
+		rec, _ := s.mediaStore.GetDownload(msg.ID, msg.ChatJID)
+		entry := IndexEntry{
+			MessageID: msg.ID,
+			ChatJID:   msg.ChatJID,
+			Timestamp: msg.Timestamp.UTC().Format("2006-01-02 15:04:05+00:00"),
+			FromMe:    msg.IsFromMe,
+			Status:    "unknown",
+		}
+		if rec != nil {
+			entry.Status = rec.Status
+			entry.SHA256 = rec.SHA256
+			entry.Error = rec.Error
+			if rec.LocalPath != "" {
+				entry.File = filepath.Base(rec.LocalPath)
+				fullPath := filepath.Join(s.storeDir, rec.LocalPath)
+				if fi, err := os.Stat(fullPath); err == nil {
+					entry.Bytes = fi.Size()
+				}
+			}
+		}
+		entries = append(entries, entry)
+	}
+
+	indexPath := filepath.Join(outDir, "index.json")
+	tmpPath := indexPath + ".part"
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err == nil {
+		if err := os.WriteFile(tmpPath, data, 0644); err == nil {
+			_ = os.Rename(tmpPath, indexPath)
+		}
+	}
+}
+
+// handleBatchJobByID handles polling and cancelling batch download jobs (GET/DELETE /api/download/batch/{id})
+func (s *Server) handleBatchJobByID(w http.ResponseWriter, r *http.Request) {
+	jobID := strings.TrimPrefix(r.URL.Path, "/api/download/batch/")
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		SendJSONError(w, "job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		job, err := s.mediaStore.GetJob(jobID)
+		if err != nil {
+			SendJSONError(w, fmt.Sprintf("Failed to get job: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if job == nil {
+			SendJSONError(w, "job not found", http.StatusNotFound)
+			return
+		}
+		SendJSON(w, job)
+
+	case http.MethodDelete:
+		if err := s.mediaStore.FinishJob(jobID, "cancelled"); err != nil {
+			SendJSONError(w, fmt.Sprintf("Failed to cancel job: %v", err), http.StatusInternalServerError)
+			return
+		}
+		SendJSON(w, map[string]interface{}{
+			"success": true,
+			"message": "job cancelled",
+		})
+
+	default:
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// servableMediaTypes maps the only file extensions /api/media/ may serve to their content types
+var servableMediaTypes = map[string]string{
+	".ogg": "audio/ogg; codecs=opus",
+	".mp3": "audio/mpeg",
+}
+
+// resolveMediaPath maps a request subpath to a file inside mediaRoot. It rejects traversal,
+// absolute paths, symlinks leaving mediaRoot, and any extension other than .ogg/.mp3, so the
+// databases and other files in the store directory can never be served.
+func resolveMediaPath(mediaRoot, subpath string) (string, string, bool) {
+	if subpath == "" || strings.Contains(subpath, "\\") {
+		return "", "", false
+	}
+	cleanPath := filepath.Clean(subpath)
+	if filepath.IsAbs(cleanPath) || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") {
+		return "", "", false
+	}
+	contentType, ok := servableMediaTypes[strings.ToLower(filepath.Ext(cleanPath))]
+	if !ok {
+		return "", "", false
+	}
+
+	rootAbs, err := filepath.EvalSymlinks(mediaRoot)
+	if err != nil {
+		return "", "", false
+	}
+	targetAbs, err := filepath.EvalSymlinks(filepath.Join(mediaRoot, cleanPath))
+	if err != nil {
+		return "", "", false
+	}
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", "", false
+	}
+	if fi, err := os.Stat(targetAbs); err != nil || !fi.Mode().IsRegular() {
+		return "", "", false
+	}
+	return targetAbs, contentType, true
+}
+
+// handleServeMedia streams downloaded audio files from <store>/media (GET /api/media/{path...})
+func (s *Server) handleServeMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	subpath := strings.TrimPrefix(r.URL.Path, "/api/media/")
+	targetPath, contentType, ok := resolveMediaPath(filepath.Join(s.storeDir, "media"), subpath)
+	if !ok {
+		SendJSONError(w, "media file not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	http.ServeFile(w, r, targetPath)
 }

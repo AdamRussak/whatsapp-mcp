@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/mdp/qrterminal"
@@ -17,7 +19,9 @@ import (
 // Client wraps the WhatsApp client with additional functionality
 type Client struct {
 	*whatsmeow.Client
-	logger waLog.Logger
+	logger              waLog.Logger
+	mediaRetries        sync.Map // messageID (string) -> chan *events.MediaRetry
+	placeholderMessages sync.Map // messageID (string) -> chan *events.Message
 }
 
 // NewClient creates a new WhatsApp client instance
@@ -25,12 +29,20 @@ func NewClient(logger waLog.Logger) (*Client, error) {
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
+	storeDir := os.Getenv("STORE_DIR")
+	if storeDir == "" {
+		storeDir = "store"
+	}
+
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on&_busy_timeout=5000", dbLog)
+	dbPath := filepath.Join(storeDir, "whatsapp.db")
+	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_busy_timeout=5000", dbPath)
+
+	container, err := sqlstore.New(context.Background(), "sqlite3", dsn, dbLog)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
@@ -155,4 +167,63 @@ func (c *Client) HandleConnectionEvent(ctx context.Context, evt interface{}, onE
 	case *events.ConnectFailure:
 		c.logger.Errorf("Connection failure: %v (reason: %s)", v.Reason, v.Message)
 	}
+}
+
+// HandleMediaRetry dispatches incoming MediaRetry events to waiting download goroutines
+func (c *Client) HandleMediaRetry(evt *events.MediaRetry) {
+	if evt == nil {
+		return
+	}
+	msgID := string(evt.MessageID)
+	if val, ok := c.mediaRetries.Load(msgID); ok {
+		if ch, ok := val.(chan *events.MediaRetry); ok {
+			select {
+			case ch <- evt:
+			default:
+			}
+		}
+	}
+}
+
+// RegisterMediaRetryWaiter registers a listener channel for a message ID's retry notification
+func (c *Client) RegisterMediaRetryWaiter(messageID string) chan *events.MediaRetry {
+	ch := make(chan *events.MediaRetry, 1)
+	c.mediaRetries.Store(messageID, ch)
+	return ch
+}
+
+// UnregisterMediaRetryWaiter cleans up a waiter channel for a message ID
+func (c *Client) UnregisterMediaRetryWaiter(messageID string) {
+	c.mediaRetries.Delete(messageID)
+}
+
+// RegisterPlaceholderWaiter registers a listener channel for a message ID's placeholder resend
+func (c *Client) RegisterPlaceholderWaiter(messageID string) chan *events.Message {
+	ch := make(chan *events.Message, 1)
+	c.placeholderMessages.Store(messageID, ch)
+	return ch
+}
+
+// UnregisterPlaceholderWaiter cleans up a placeholder waiter channel
+func (c *Client) UnregisterPlaceholderWaiter(messageID string) {
+	c.placeholderMessages.Delete(messageID)
+}
+
+// HandlePlaceholderMessage dispatches incoming placeholder resend Message events to waiting goroutines
+func (c *Client) HandlePlaceholderMessage(evt *events.Message) bool {
+	if evt == nil {
+		return false
+	}
+	msgID := string(evt.Info.ID)
+	if val, ok := c.placeholderMessages.Load(msgID); ok {
+		if ch, ok := val.(chan *events.Message); ok {
+			select {
+			case ch <- evt:
+				return true
+			default:
+				return true
+			}
+		}
+	}
+	return false
 }
