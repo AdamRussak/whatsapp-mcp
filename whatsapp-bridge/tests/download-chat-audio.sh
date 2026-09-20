@@ -9,18 +9,37 @@ if [ -z "$CHAT" ]; then
 fi
 
 LIMIT="${2:-5000}"
+AFTER="${3:-${AFTER:-}}"
+BEFORE="${4:-${BEFORE:-}}"
+SKIP_MEDIA_RETRY="${SKIP_MEDIA_RETRY:-true}"
 BRIDGE_URL="${BRIDGE_URL:-http://localhost:8080}"
 
 echo "=================================================="
 echo "Starting chat audio download for: ${CHAT}"
 echo "Bridge URL: ${BRIDGE_URL}"
 echo "Limit: ${LIMIT}"
+if [ -n "${AFTER}" ]; then echo "After: ${AFTER}"; fi
+if [ -n "${BEFORE}" ]; then echo "Before: ${BEFORE}"; fi
+echo "Skip media retry: ${SKIP_MEDIA_RETRY}"
 echo "=================================================="
 
 # 1. Trigger the batch job
+PAYLOAD=$(jq -n \
+    --arg chat "$CHAT" \
+    --argjson limit "$LIMIT" \
+    --arg after "$AFTER" \
+    --arg before "$BEFORE" \
+    --argjson skip_media_retry "$SKIP_MEDIA_RETRY" \
+    '{
+        chat: $chat,
+        limit: $limit,
+        skip_cached: true,
+        skip_media_retry: $skip_media_retry
+    } + (if $after != "" then {after: $after} else {} end) + (if $before != "" then {before: $before} else {} end)')
+
 RESP=$(curl -s -f -X POST "${BRIDGE_URL}/api/download/batch" \
     -H "Content-Type: application/json" \
-    -d "{\"chat\": \"${CHAT}\", \"limit\": ${LIMIT}, \"skip_cached\": true}")
+    -d "${PAYLOAD}")
 
 JOB_ID=$(echo "${RESP}" | jq -r '.job_id // empty')
 TOTAL=$(echo "${RESP}" | jq -r '.total // 0')

@@ -177,6 +177,38 @@ func (s *MediaStore) GetDownload(messageID, chatJID string) (*MediaDownloadRecor
 	return &rec, nil
 }
 
+// GetDownloadAnyChat retrieves a media download record for messageID regardless of chatJID
+func (s *MediaStore) GetDownloadAnyChat(messageID string) (*MediaDownloadRecord, error) {
+	row := s.db.QueryRow(`
+		SELECT message_id, chat_jid, local_path, sha256, direct_path, downloaded_at, status, error
+		FROM media_downloads
+		WHERE message_id = ?
+		LIMIT 1
+	`, messageID)
+
+	var rec MediaDownloadRecord
+	var downloadedAt sql.NullTime
+	var localPath, sha256, directPath, errStr sql.NullString
+
+	err := row.Scan(&rec.MessageID, &rec.ChatJID, &localPath, &sha256, &directPath, &downloadedAt, &rec.Status, &errStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	rec.LocalPath = localPath.String
+	rec.SHA256 = sha256.String
+	rec.DirectPath = directPath.String
+	rec.Error = errStr.String
+	if downloadedAt.Valid {
+		rec.DownloadedAt = &downloadedAt.Time
+	}
+
+	return &rec, nil
+}
+
 // CreateJob creates a new batch download job
 func (s *MediaStore) CreateJob(job *DownloadJob) error {
 	_, err := s.db.Exec(`

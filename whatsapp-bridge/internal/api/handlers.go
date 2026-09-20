@@ -348,13 +348,14 @@ func (s *Server) handleDownloadMedia(w http.ResponseWriter, r *http.Request) {
 
 // BatchDownloadRequest defines options for POST /api/download/batch
 type BatchDownloadRequest struct {
-	Chat        string `json:"chat"`
-	MediaType   string `json:"media_type"`
-	After       string `json:"after"`
-	Before      string `json:"before"`
-	Limit       int    `json:"limit"`
-	SkipCached  *bool  `json:"skip_cached"`
-	RetryFailed bool   `json:"retry_failed"`
+	Chat           string `json:"chat"`
+	MediaType      string `json:"media_type"`
+	After          string `json:"after"`
+	Before         string `json:"before"`
+	Limit          int    `json:"limit"`
+	SkipCached     *bool  `json:"skip_cached"`
+	RetryFailed    bool   `json:"retry_failed"`
+	SkipMediaRetry bool   `json:"skip_media_retry"`
 }
 
 // handleDownloadBatch starts an asynchronous batch download job (POST /api/download/batch)
@@ -421,7 +422,7 @@ func (s *Server) handleDownloadBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run job in background
-	go s.runBatchDownload(jobID, req.Chat, resolvedJIDs, messages, skipCached, req.RetryFailed)
+	go s.runBatchDownload(jobID, req.Chat, resolvedJIDs, messages, skipCached, req.RetryFailed, req.SkipMediaRetry)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -441,7 +442,7 @@ func (s *Server) runBatchDownload(
 	jobID, chat string,
 	resolvedJIDs []string,
 	messages []database.MediaInfo,
-	skipCached, retryFailed bool,
+	skipCached, retryFailed, skipMediaRetry bool,
 ) {
 	done := 0
 	failed := 0
@@ -465,6 +466,21 @@ func (s *Server) runBatchDownload(
 		}
 
 		rec, _ := s.mediaStore.GetDownload(msg.ID, msg.ChatJID)
+		if rec == nil {
+			if otherRec, _ := s.mediaStore.GetDownloadAnyChat(msg.ID); otherRec != nil {
+				_ = s.mediaStore.RecordDownload(&database.MediaDownloadRecord{
+					MessageID:  msg.ID,
+					ChatJID:    msg.ChatJID,
+					LocalPath:  otherRec.LocalPath,
+					SHA256:     otherRec.SHA256,
+					DirectPath: otherRec.DirectPath,
+					Status:     otherRec.Status,
+					Error:      otherRec.Error,
+				})
+				rec = otherRec
+			}
+		}
+
 		if skipCached && rec != nil && rec.Status == database.DownloadStatusOK && rec.LocalPath != "" {
 			fullPath := filepath.Join(s.storeDir, rec.LocalPath)
 			if fi, err := os.Stat(fullPath); err == nil && fi.Size() > 0 {
@@ -475,15 +491,22 @@ func (s *Server) runBatchDownload(
 		}
 
 		// Permanent failures (not on phone, re-keyed on phone, incomplete metadata) can't
-		// succeed on a re-run; skip them so no retry request reaches a phone again
-		if !retryFailed && rec != nil && database.IsPermanentDownloadFailure(rec.Status) {
+		// succeed on a re-run; skip them so no retry request reaches a phone again.
+		// Also skip failed records if skipMediaRetry is on and retryFailed is not set.
+		if !retryFailed && rec != nil && (database.IsPermanentDownloadFailure(rec.Status) || (skipMediaRetry && rec.Status == database.DownloadStatusFailed)) {
 			skipped++
 			_ = s.mediaStore.UpdateJobProgress(jobID, done, failed, skipped, msg.ID)
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), s.client.MediaRetryTimeout()+30*time.Second)
-		_, err = s.client.DownloadMedia(ctx, s.mediaStore, s.messageStore, msg.ID, msg.ChatJID, s.storeDir)
+		timeout := s.client.MediaRetryTimeout() + 30*time.Second
+		if skipMediaRetry {
+			timeout = 15 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		_, err = s.client.DownloadMediaWithOptions(ctx, s.mediaStore, s.messageStore, msg.ID, msg.ChatJID, s.storeDir, whatsapp.DownloadOptions{
+			SkipMediaRetry: skipMediaRetry,
+		})
 		cancel()
 
 		if err != nil {

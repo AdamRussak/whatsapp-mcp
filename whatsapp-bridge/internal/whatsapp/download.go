@@ -126,6 +126,11 @@ func (c *Client) mediaFolderKey(chatJID, storeDir string) string {
 	return key
 }
 
+// DownloadOptions configures media download behavior
+type DownloadOptions struct {
+	SkipMediaRetry bool
+}
+
 // DownloadMedia downloads an audio message, checking cache, downloading from WhatsApp,
 // and triggering media-retry receipts if CDN tokens are expired.
 func (c *Client) DownloadMedia(
@@ -133,6 +138,17 @@ func (c *Client) DownloadMedia(
 	mediaStore *database.MediaStore,
 	messageStore *database.MessageStore,
 	messageID, chatJID, storeDir string,
+) (*DownloadResult, error) {
+	return c.DownloadMediaWithOptions(ctx, mediaStore, messageStore, messageID, chatJID, storeDir, DownloadOptions{})
+}
+
+// DownloadMediaWithOptions downloads an audio message with additional options (e.g. SkipMediaRetry).
+func (c *Client) DownloadMediaWithOptions(
+	ctx context.Context,
+	mediaStore *database.MediaStore,
+	messageStore *database.MessageStore,
+	messageID, chatJID, storeDir string,
+	opts DownloadOptions,
 ) (*DownloadResult, error) {
 	if storeDir == "" {
 		storeDir = "store"
@@ -233,6 +249,16 @@ func (c *Client) DownloadMedia(
 	data, err = c.Client.DownloadMediaWithPath(ctx, directPath, info.FileEncSHA256, info.FileSHA256, info.MediaKey, whatsmeow.MediaAudio, "", false)
 	if err != nil {
 		if isExpiredMediaErr(err) {
+			if opts.SkipMediaRetry {
+				_ = mediaStore.RecordDownload(&database.MediaDownloadRecord{
+					MessageID:  messageID,
+					ChatJID:    chatJID,
+					DirectPath: directPath,
+					Status:     database.DownloadStatusFailed,
+					Error:      "direct download expired: " + err.Error(),
+				})
+				return nil, fmt.Errorf("direct download expired (media retry skipped): %w", err)
+			}
 			c.logger.Infof("Direct download expired (403/404/410) for message %s, initiating media retry...", messageID)
 			var retryPath string
 			data, retryPath, err = c.downloadWithMediaRetry(ctx, messageID, chatJID, info, whatsmeow.MediaAudio)
