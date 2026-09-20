@@ -442,7 +442,7 @@ Verified by `pip install --dry-run` in a throwaway `python:3.13` container: reso
 
 `whatsapp-mcp-server/uv.lock` is stale (pins `mcp 1.6.0`) and is not used by the image build. Regenerate or delete it when local `uv` development matters.
 
-**Go / whatsmeow upgrade** (first change that touches `whatsapp.db`'s schema — its own backup and image tag; forward-only):
+**Go / whatsmeow upgrade ✅ built and tested, ❌ not deployed** (first change that touches `whatsapp.db`'s schema — its own backup and image tag):
 
 | Package | Current | Target |
 |---|---|---|
@@ -452,15 +452,21 @@ Verified by `pip install --dry-run` in a throwaway `python:3.13` container: reso
 | `github.com/mattn/go-sqlite3` | 1.14.48 | 1.14.52 |
 | `google.golang.org/protobuf` | 1.36.11 | 1.36.12 |
 | `golang.org/x/*` | 0.54/0.57 | 0.57/0.59 |
-| FontAwesome CDN (webhook UI) | 6.0.0 | 6.7.2 |
+| FontAwesome CDN (webhook UI) | 6.0.0 | 6.7.2 ✅ (`whatsapp-webhook-ui/index.html`) |
 
-```bash
-cd whatsapp-bridge
-go get go.mau.fi/whatsmeow@v0.0.0-20260917111002-2e338d0ee73d
-go get github.com/mattn/go-sqlite3@v1.14.52 google.golang.org/protobuf@v1.36.12
-go mod tidy && go test ./...
+Done 2026-09-20: one `go get go.mau.fi/whatsmeow@v0.0.0-20260917111002-2e338d0ee73d` pulled every target version in the table above. The toolchain auto-switched to go1.26.8 (`GOTOOLCHAIN=auto`); `Dockerfile.bridge` now builds `FROM golang:1.26-bookworm` and the image builds clean (tagged `whatsapp-bridge:phase0`). **No source change was needed** — `go vet` clean, `go build ./...` clean, all 31 tests pass. It won't fix B1: the newer release defines the same `MediaRetryNotification` fields (§2.5).
+
+**What the deploy does to `whatsapp.db`** (measured, not assumed): the live DB is at `whatsmeow_version = (version 14, compat 8)`. The new module's upgrade table has 15 entries, so the first start applies exactly **one** migration:
+```sql
+-- v15 (compatible with v8+): Add companion meta nonce column to device table
+ALTER TABLE whatsmeow_device ADD COLUMN companion_meta_nonce TEXT NOT NULL DEFAULT '';
 ```
-Rehearse on `store-test` first. It won't fix B1: the newer release defines the same `MediaRetryNotification` fields (§2.5).
+Additive, with a constant default, and compat stays 8.
+
+> [!NOTE]
+> **Rollback survives this migration.** `dbutil.Database.Upgrade` refuses a DB only when `compat > len(UpgradeTable)`. After the deploy the DB is `(15, 8)`; the old binary knows 14 upgrades and `8 ≤ 14`, so it still opens it, and it ignores the extra column (`NOT NULL DEFAULT ''`, so its inserts still work). The pre-upgrade backup plus `whatsapp-bridge:pre-m1` remain the belt-and-braces route, but this step is not the one-way door §4.4 describes.
+
+**Deploy checklist when it goes out** (§4.6): `docker compose stop` → back up `messages.db`, `whatsapp.db`, `media.db` + `integrity_check` → tag the running image `whatsapp-bridge:pre-phase0` → `docker compose up -d --build` → confirm the log shows the v14→v15 upgrade, the bridge reconnects without a QR prompt, `whatsmeow_version` reads `15|8`, and `/api/download` still serves a cached item.
 
 ### Phase 1 — Live voice-note tagging (schema v1) ❌
 
