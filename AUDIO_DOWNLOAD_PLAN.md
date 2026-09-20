@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-20:** Milestone 1 is complete! Full history batch download executed on target contact `972523996302` / `18674685612157@lid` (4,062 items total): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), unavailable/expired media recorded with explicit status in `media.db` and `index.json`. 0 writes to `messages.db`. Definition of done (§5.6) is 100% satisfied. Next is **Phase 0**.
+**Status as of 2026-09-20:** Milestone 1 and **Phase 0 are complete and deployed.** Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 20:26 UTC (§2.10). Next is **Phase 1 + Phase 5**. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -16,7 +16,7 @@ Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started 
 | G3 | Download past voice messages from one chat or group | Milestone 1 (batch job) → Phase 5 (by sender, history request) | ✅ batch job run over the target contact's full history (4,062 items, §2.9); only the last ~11–19 days are recoverable (B1) |
 | G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | ❌ |
 
-Order: **Milestone 1 → Phase 0 → Phase 1 + Phase 5 → Phases 2/3 → Phase 4 → Phase 6.** Nothing after Milestone 1 starts until its definition of done (§5.6) is met.
+Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 + Phase 5 ← next → Phases 2/3 → Phase 4 → Phase 6.**
 
 ---
 
@@ -186,6 +186,26 @@ Two changes were needed to finish the run in an hour instead of days, both commi
 
 > [!NOTE]
 > The 3,619 `failed` rows are almost all `skip_media_retry` refusals, not proven failures. A future run with the flag off would send ~3,600 retry receipts to the two phones and, on the B1 evidence, turn nearly all of them into `rekeyed_on_phone`. Only do that if B1 ever gets a fix (§2.5 options 2–4).
+
+### 2.10 Phase 0 deployed (2026-09-20, 20:22–20:29 UTC)
+
+Checklist §4.6, run in order:
+
+| Step | Result |
+|---|---|
+| Baseline | `messages` 476,670 · `chats` 3,936 · `webhook_configs` 7 · `contact_nicknames` 0 · `whatsmeow_version` `14|8` |
+| `docker compose stop` | clean, no `-journal` / `-wal` left |
+| Backups + `integrity_check` | `store/backups/{messages,whatsapp,media}_20260920_202211.db`, all three `ok` |
+| Rollback tag | `whatsapp-bridge:pre-phase0` = `d034c3f39f45` (the 12:03 image) |
+| `docker compose up -d --build` | ⚠️ **started the stale container instead of replacing it** — the running image was still the morning's, `whatsmeow_version` stayed `14|8`, the new binary never ran. This is the §4.6 step 7 caveat; `docker compose up -d --force-recreate` fixed it. Check the running image ID, not just "Up/healthy". |
+| Migration | `whatsmeow_version` `14|8` → **`15|8`**; `whatsmeow_device.companion_meta_nonce TEXT NOT NULL DEFAULT ''` present. Exactly the one predicted migration. |
+| Reconnect | `✓ Connected to WhatsApp!` at 20:26:58, **no QR prompt**, healthy |
+| `messages.db` | `quick_check` `ok`; all four baseline counts identical; 8 tables, unchanged |
+| API | `POST /api/download` on a cached item → 200 `cached:true`; `GET /api/media/<chat>/<file>.ogg` → 200, `audio/ogg; codecs=opus`, 3,968 bytes; `GET /api/media/../whatsapp.db` → **404** (S1 guard intact) |
+| Batch | `job_20260920_202820_316` on `972523996302`, limit 25: `done: 4`, `skipped: 21`, `failed: 0`. The 4 are voice notes that arrived since the full run — direct downloads on the new whatsmeow. `media.db` `ok` 107 → **111**. |
+| MCP container | rebuilt from the pinned `requirements.txt`: `mcp 1.30.0` (not 2.x), `gradio 5.34.2`, `starlette 0.52.1`, `uvicorn 0.53.0`, `requests 2.34.2`. The pin is now proven by a real build, not just a dry run. |
+
+**Rollback if needed:** `docker compose stop`, restore `store/backups/*_20260920_202211.db`, run `whatsapp-bridge:pre-phase0`. As measured in §6, the old binary also opens the migrated `(15, 8)` DB, so restoring the backup is optional.
 
 ---
 
@@ -424,7 +444,7 @@ sudo sqlite3 "file:store/media.db?mode=ro" "SELECT status, COUNT(*) FROM media_d
 
 ## 6. Later phases
 
-### Phase 0 — Dependencies 🟡
+### Phase 0 — Dependencies ✅ (deployed 2026-09-20, §2.10)
 
 **Python pins ✅ (2026-09-20).** `whatsapp-mcp-server/requirements.txt` (the file the image actually installs from — `dockerfile` runs `pip install -r requirements.txt`) and `pyproject.toml` now both carry:
 ```text
@@ -442,7 +462,7 @@ Verified by `pip install --dry-run` in a throwaway `python:3.13` container: reso
 
 `whatsapp-mcp-server/uv.lock` is stale (pins `mcp 1.6.0`) and is not used by the image build. Regenerate or delete it when local `uv` development matters.
 
-**Go / whatsmeow upgrade ✅ built and tested, ❌ not deployed** (first change that touches `whatsapp.db`'s schema — its own backup and image tag):
+**Go / whatsmeow upgrade ✅ deployed** (first change that touches `whatsapp.db`'s schema — its own backup and image tag):
 
 | Package | Current | Target |
 |---|---|---|
