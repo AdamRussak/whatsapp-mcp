@@ -424,9 +424,9 @@ sudo sqlite3 "file:store/media.db?mode=ro" "SELECT status, COUNT(*) FROM media_d
 
 ## 6. Later phases
 
-### Phase 0 — Dependencies ❌
+### Phase 0 — Dependencies 🟡
 
-**Do first (cheap, prevents breakage):** in `whatsapp-mcp-server/requirements.txt` (currently `mcp[cli]>=1.6.0`, unbounded) and `pyproject.toml`:
+**Python pins ✅ (2026-09-20).** `whatsapp-mcp-server/requirements.txt` (the file the image actually installs from — `dockerfile` runs `pip install -r requirements.txt`) and `pyproject.toml` now both carry:
 ```text
 httpx>=0.28.1
 mcp[cli]>=1.28.1,<2
@@ -436,7 +436,11 @@ uvicorn>=0.51.0
 gradio==5.34.2
 gradio_client==1.10.3
 ```
-MCP 2.x is a breaking rewrite (`FastMCP` → `MCPServer`); an uncached rebuild would pull it today. Gradio 6.x breaks `mcp_server=True`.
+The bound was load-bearing: **mcp 2.2.0 is on PyPI today**, `gradio-main.py` imports `mcp.server.fastmcp.FastMCP`, so an uncached rebuild would have broken the MCP server. Gradio 6.28.0 is out too; the existing `==5.34.2` already excluded it (6.x breaks `mcp_server=True`).
+
+Verified by `pip install --dry-run` in a throwaway `python:3.13` container: resolves to `mcp 1.30.0`, `starlette 0.52.1`, `uvicorn 0.53.0`, `requests 2.34.2`, `gradio 5.34.2`, `httpx 0.28.1` — **identical to what the running container has**, so a rebuild reproduces the current environment. No rebuild was done; the running container is untouched.
+
+`whatsapp-mcp-server/uv.lock` is stale (pins `mcp 1.6.0`) and is not used by the image build. Regenerate or delete it when local `uv` development matters.
 
 **Go / whatsmeow upgrade** (first change that touches `whatsapp.db`'s schema — its own backup and image tag; forward-only):
 

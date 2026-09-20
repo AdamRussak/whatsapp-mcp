@@ -1,7 +1,7 @@
 httpx>=0.28.1
-mcp[cli]>=1.6.0
-requests>=2.32.3
-starlette>=0.37.2
-uvicorn>=0.23.2
+mcp[cli]>=1.28.1,<2
+requests>=2.34.2
+starlette>=0.37.2,<1.0
+uvicorn>=0.51.0
 gradio==5.34.2
 gradio_client==1.10.3
