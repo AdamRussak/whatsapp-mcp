@@ -3,6 +3,8 @@ package database
 import (
 	"testing"
 	"time"
+
+	"whatsapp-bridge/internal/types"
 )
 
 func TestMediaStore(t *testing.T) {
@@ -110,13 +112,14 @@ func TestListAudioMessagesAndGetMediaInfo(t *testing.T) {
 	encSha := make([]byte, 32)
 
 	err = store.StoreMessage("M1", "chat1@s.whatsapp.net", "972500000001", "", now, true,
-		"audio", "audio_01.ogg", "https://mmg.whatsapp.net/v/t62/test1.enc", mediaKey, sha, encSha, 1024)
+		types.MediaMetadata{MediaType: "audio", Filename: "audio_01.ogg", URL: "https://mmg.whatsapp.net/v/t62/test1.enc",
+			MediaKey: mediaKey, FileSHA256: sha, FileEncSHA256: encSha, FileLength: 1024})
 	if err != nil {
 		t.Fatalf("StoreMessage M1 failed: %v", err)
 	}
 
 	err = store.StoreMessage("M2", "chat1@s.whatsapp.net", "972500000001", "hello", now.Add(time.Second), false,
-		"", "", "", nil, nil, nil, 0)
+		types.MediaMetadata{})
 	if err != nil {
 		t.Fatalf("StoreMessage M2 failed: %v", err)
 	}
@@ -143,7 +146,7 @@ func TestListAudioMessagesAndGetMediaInfo(t *testing.T) {
 	}
 
 	// 2. Test ListAudioMessages
-	list, err := store.ListAudioMessages([]string{"chat1@s.whatsapp.net"}, "", "", 10)
+	list, err := store.ListAudioMessages([]string{"chat1@s.whatsapp.net"}, "", "", 10, false)
 	if err != nil {
 		t.Fatalf("ListAudioMessages failed: %v", err)
 	}
@@ -232,7 +235,8 @@ func TestListAudioMessagesTimeFilter(t *testing.T) {
 		at, _ := time.Parse(time.RFC3339, ts)
 		id := string(rune('A' + i))
 		if err := store.StoreMessage(id, "c@s.whatsapp.net", "1", "", at, false,
-			"audio", "a.ogg", "https://mmg.whatsapp.net/v/x.enc", key, key, key, 1); err != nil {
+			types.MediaMetadata{MediaType: "audio", Filename: "a.ogg", URL: "https://mmg.whatsapp.net/v/x.enc",
+				MediaKey: key, FileSHA256: key, FileEncSHA256: key, FileLength: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -240,7 +244,7 @@ func TestListAudioMessagesTimeFilter(t *testing.T) {
 	// Same instant written three ways must select the same rows. Before normalization,
 	// "2026-01-01T12:00:00Z" compared as text sorted after every stored "2026-01-01 ..." value.
 	for _, after := range []string{"2026-01-01T12:00:00Z", "2026-01-01 12:00:00", "2026-01-01T14:00:00+02:00"} {
-		list, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, after, "", 0)
+		list, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, after, "", 0, false)
 		if err != nil {
 			t.Fatalf("after=%q: %v", after, err)
 		}
@@ -249,12 +253,12 @@ func TestListAudioMessagesTimeFilter(t *testing.T) {
 		}
 	}
 
-	list, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, "", "2026-01-02", 0)
+	list, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, "", "2026-01-02", 0, false)
 	if err != nil || len(list) != 2 {
 		t.Errorf("before=2026-01-02: got %d rows, err %v; want 2", len(list), err)
 	}
 
-	if _, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, "yesterday", "", 0); err == nil {
+	if _, err := store.ListAudioMessages([]string{"c@s.whatsapp.net"}, "yesterday", "", 0, false); err == nil {
 		t.Error("invalid after: expected error")
 	}
 }

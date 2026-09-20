@@ -52,6 +52,12 @@ func NewMessageStoreWithDir(storeDir string) (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
+	// Apply schema migrations before anything can serve from this database
+	if err := runMigrations(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate message database: %w", err)
+	}
+
 	return &MessageStore{db: db}, nil
 }
 

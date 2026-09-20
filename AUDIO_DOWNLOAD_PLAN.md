@@ -488,17 +488,20 @@ Additive, with a constant default, and compat stays 8.
 
 **Deploy checklist when it goes out** (§4.6): `docker compose stop` → back up `messages.db`, `whatsapp.db`, `media.db` + `integrity_check` → tag the running image `whatsapp-bridge:pre-phase0` → `docker compose up -d --build` → confirm the log shows the v14→v15 upgrade, the bridge reconnects without a QR prompt, `whatsmeow_version` reads `15|8`, and `/api/download` still serves a cached item.
 
-### Phase 1 — Live voice-note tagging (schema v1) ❌
+### Phase 1 — Live voice-note tagging (schema v1) ✅ (2026-09-20, §2.11)
 
 Only needed for live `is_ptt` tagging and auto-download; history download does not need it.
 
-- Migration v1 in new `internal/database/migrations.go`: `direct_path TEXT`, `mimetype TEXT`, `seconds INTEGER`, `is_ptt BOOLEAN`, `local_path TEXT`, `downloaded_at TIMESTAMP`.
-- `ExtractMediaInfo` returns them (`AudioMessage.GetPTT()`, `GetSeconds()`, `GetDirectPath()`, `GetMimetype()`); new rows named `voice_<msgID>.ogg`. Keep `media_type='audio'`; expose virtual type `voice` = audio + `is_ptt`.
-- `StoreMessage` → `ON CONFLICT … COALESCE` (§4.3) **before** anything writes `local_path`.
-- `SetMediaLocalPath`, `SetMediaDirectPath` (after `SUCCESS` only). Decide whether `media.db` stays the source of truth for downloads or is mirrored into `messages`.
-- Skip view-once audio.
-- `PUBLIC_BASE_URL` in `webhook/manager.go` and `docker-compose.yaml`; add `message_id`, `chat_jid`, `is_ptt`, `seconds` to webhook payloads (B10).
-- Tests: migration on an old-schema temp DB keeps rows byte-identical and is a no-op on re-run; replay keeps `local_path`/`content`/`filename`/`url`; setters affect exactly one row. `grep -rn "INSERT OR REPLACE INTO messages\|SELECT \*"` returns nothing.
+**Decision taken:** `media.db` stays the single source of truth for download state, so v1 adds **four** columns, not six. `local_path` and `downloaded_at` are deliberately *not* mirrored into `messages`: keeping them out is what lets the download code stay `SELECT`-only on `messages.db`, so both guard tests from §2.8 remain valid and there is no second copy of the path to drift. `SetMediaLocalPath` / `SetMediaDirectPath` are therefore not needed; a fresh direct path from a media retry already goes to `media.db` (§2.5).
+
+- ✅ Migration v1 in `internal/database/migrations.go`: `direct_path TEXT`, `mimetype TEXT`, `seconds INTEGER`, `is_ptt BOOLEAN`. Versioned in `schema_migrations`, one transaction per version, each `ALTER` skipped when `PRAGMA table_info` already shows the column, run from `NewMessageStoreWithDir` (so before the HTTP listener), and a failure now exits non-zero instead of returning 0.
+- ✅ `ExtractMediaInfo(msg, msgID)` returns a `types.MediaMetadata` struct instead of seven positional values, carrying `GetPTT()`, `GetSeconds()`, `GetDirectPath()`, `GetMimetype()`. Voice notes are named `voice_<msgID>.ogg` and audio files `audio_<msgID>.ogg`, which also fixes the second-resolution filename collision of §3.2 finding 8. `media_type` stays `audio`.
+- ✅ Virtual type `voice` = audio + `is_ptt`: `POST /api/download/batch` now honours its previously dead `media_type` field (`audio` | `voice`, anything else → 400). Only messages received since v1 carry `is_ptt`, so `voice` finds nothing in older history — documented at the call site.
+- ✅ `StoreMessage` → `INSERT … ON CONFLICT(id, chat_jid) DO UPDATE SET` filling only v1 columns that are still NULL (§4.3). Absent values are stored as NULL rather than `""`/`0`, so a later replay that does carry them can fill them in.
+- ✅ View-once audio is skipped: no URL, key or direct path is kept for it, so nothing here can download it later.
+- ✅ `PUBLIC_BASE_URL` now feeds `webhook.NewManager`, replacing the hardcoded `http://localhost:8080/api/download`, and is set in `docker-compose.yaml` to the bridge's container DNS name (what the MCP server and other services on `whatsapp_internal` can actually reach). Webhook payloads gained `is_ptt` and `seconds`; `id` and `chat_jid` were already present (B10).
+- ✅ Tests (38 in the suite, up from 31): migration leaves all rows byte-identical and is a no-op on re-open; a replay with different content/filename/url/keys rewrites nothing but backfills NULL v1 columns; a second empty replay does not blank them; new voice notes land with their metadata and text messages leave the audio columns NULL; `ExtractMediaInfo` covers ptt, non-ptt, view-once, missing ID and the non-audio branches. `TestNoForbiddenSQL` walks every `.go` file for `INSERT OR REPLACE INTO messages` and `SELECT *` — verified to fail when a violation is injected.
+- `cmd/migrate` applies pending migrations to a `STORE_DIR` copy without connecting to WhatsApp, for rehearsing the next one.
 
 ### Phase 2 — MCP server (Python) 🟡
 

@@ -83,38 +83,72 @@ func ExtractPollInfo(msg *waProto.Message) *types.PollInfo {
 	}
 }
 
-// ExtractMediaInfo extracts media information from a WhatsApp message
-func ExtractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+// ExtractMediaInfo extracts media information from a WhatsApp message.
+//
+// msgID names the file for audio, so two voice notes in the same second no longer
+// collide (the old name was built from time.Now() at second resolution). Callers that
+// only need the media type may pass "".
+func ExtractMediaInfo(msg *waProto.Message, msgID string) types.MediaMetadata {
 	if msg == nil {
-		return "", "", "", nil, nil, nil, 0
+		return types.MediaMetadata{}
 	}
 
 	// Check for poll creation message
 	if GetPollCreationFromMessage(msg) != nil {
-		return "poll", "", "", nil, nil, nil, 0
+		return types.MediaMetadata{MediaType: "poll"}
 	}
 
 	// Check for poll update (vote) message
 	if msg.GetPollUpdateMessage() != nil {
-		return "poll_vote", "", "", nil, nil, nil, 0
+		return types.MediaMetadata{MediaType: "poll_vote"}
 	}
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
-			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
+		return types.MediaMetadata{
+			MediaType:     "image",
+			Filename:      "image_" + time.Now().Format("20060102_150405") + ".jpg",
+			URL:           img.GetURL(),
+			MediaKey:      img.GetMediaKey(),
+			FileSHA256:    img.GetFileSHA256(),
+			FileEncSHA256: img.GetFileEncSHA256(),
+			FileLength:    img.GetFileLength(),
+		}
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
-			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
+		return types.MediaMetadata{
+			MediaType:     "video",
+			Filename:      "video_" + time.Now().Format("20060102_150405") + ".mp4",
+			URL:           vid.GetURL(),
+			MediaKey:      vid.GetMediaKey(),
+			FileSHA256:    vid.GetFileSHA256(),
+			FileEncSHA256: vid.GetFileEncSHA256(),
+			FileLength:    vid.GetFileLength(),
+		}
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
-			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
+		// View-once audio is meant to vanish after playing: keep no decryption material
+		// for it, so nothing here can download it later.
+		if aud.GetViewOnce() {
+			return types.MediaMetadata{}
+		}
+		return types.MediaMetadata{
+			MediaType:     "audio",
+			Filename:      audioFilename(aud.GetPTT(), msgID),
+			URL:           aud.GetURL(),
+			MediaKey:      aud.GetMediaKey(),
+			FileSHA256:    aud.GetFileSHA256(),
+			FileEncSHA256: aud.GetFileEncSHA256(),
+			FileLength:    aud.GetFileLength(),
+			DirectPath:    aud.GetDirectPath(),
+			Mimetype:      aud.GetMimetype(),
+			Seconds:       aud.GetSeconds(),
+			IsPTT:         aud.GetPTT(),
+		}
 	}
 
 	// Check for document message
@@ -123,11 +157,31 @@ func ExtractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 		if filename == "" {
 			filename = "document_" + time.Now().Format("20060102_150405")
 		}
-		return "document", filename,
-			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
+		return types.MediaMetadata{
+			MediaType:     "document",
+			Filename:      filename,
+			URL:           doc.GetURL(),
+			MediaKey:      doc.GetMediaKey(),
+			FileSHA256:    doc.GetFileSHA256(),
+			FileEncSHA256: doc.GetFileEncSHA256(),
+			FileLength:    doc.GetFileLength(),
+		}
 	}
 
-	return "", "", "", nil, nil, nil, 0
+	return types.MediaMetadata{}
+}
+
+// audioFilename names a voice note or audio file after its message ID, falling back to a
+// timestamp when no ID is available.
+func audioFilename(isPTT bool, msgID string) string {
+	prefix := "audio_"
+	if isPTT {
+		prefix = "voice_"
+	}
+	if msgID == "" {
+		return prefix + time.Now().Format("20060102_150405") + ".ogg"
+	}
+	return prefix + msgID + ".ogg"
 }
 
 // AnalyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file

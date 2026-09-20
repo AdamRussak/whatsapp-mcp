@@ -14,6 +14,24 @@ type Message struct {
 	Filename  string
 }
 
+// MediaMetadata describes the media attached to a message, in the shape messages.db
+// stores it. Download state (local path, status) is not here: it lives in media.db.
+type MediaMetadata struct {
+	MediaType     string
+	Filename      string
+	URL           string
+	MediaKey      []byte
+	FileSHA256    []byte
+	FileEncSHA256 []byte
+	FileLength    uint64
+
+	// Added by schema v1, captured from the protobuf for audio messages
+	DirectPath string
+	Mimetype   string
+	Seconds    uint32
+	IsPTT      bool // true for a voice note, false for an attached audio file
+}
+
 // WebhookConfig represents a webhook configuration
 type WebhookConfig struct {
 	ID          int              `json:"id"`
@@ -69,6 +87,8 @@ type WebhookMessageInfo struct {
 	IsFromMe         bool          `json:"is_from_me"`
 	MediaType        string        `json:"media_type"`
 	Filename         string        `json:"filename"`
+	IsPTT            bool          `json:"is_ptt,omitempty"`  // voice note rather than an audio file
+	Seconds          uint32        `json:"seconds,omitempty"` // audio duration
 	MediaDownloadURL string        `json:"media_download_url"`
 	PollInfo         *PollInfo     `json:"poll_info,omitempty"`
 	PollVoteInfo     *PollVoteInfo `json:"poll_vote_info,omitempty"`
@@ -90,8 +110,8 @@ type PollOption struct {
 // PollVoteInfo represents a poll vote message
 type PollVoteInfo struct {
 	Voter             string   `json:"voter"`
-	SelectedOptions   []string `json:"selected_options"`      // option names (if decryptable)
-	SelectedHashes    []string `json:"selected_hashes"`       // hex SHA256 hashes
+	SelectedOptions   []string `json:"selected_options"` // option names (if decryptable)
+	SelectedHashes    []string `json:"selected_hashes"`  // hex SHA256 hashes
 	CreationMessageID string   `json:"creation_message_id"`
 }
 

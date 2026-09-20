@@ -9,6 +9,7 @@ import (
 
 	"go.mau.fi/whatsmeow/types/events"
 	"whatsapp-bridge/internal/database"
+	bridgetypes "whatsapp-bridge/internal/types"
 )
 
 const testChat = "972500000001@s.whatsapp.net"
@@ -35,11 +36,13 @@ func newDownloadFixture(t *testing.T, mediaKey []byte) (string, *Client, *databa
 		t.Fatal(err)
 	}
 	hash := make([]byte, 32)
-	if err := ms.StoreMessage("AUD1", testChat, "972500000001", "", at, true, "audio", "audio_x.ogg",
-		"https://mmg.whatsapp.net/v/t62.7117-24/x.enc?ccb=11-4&oh=o&oe=e", mediaKey, hash, hash, 100); err != nil {
+	if err := ms.StoreMessage("AUD1", testChat, "972500000001", "", at, true,
+		bridgetypes.MediaMetadata{MediaType: "audio", Filename: "audio_x.ogg",
+			URL:      "https://mmg.whatsapp.net/v/t62.7117-24/x.enc?ccb=11-4&oh=o&oe=e",
+			MediaKey: mediaKey, FileSHA256: hash, FileEncSHA256: hash, FileLength: 100}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.StoreMessage("TXT1", testChat, "972500000001", "hi", at, false, "", "", "", nil, nil, nil, 0); err != nil {
+	if err := ms.StoreMessage("TXT1", testChat, "972500000001", "hi", at, false, bridgetypes.MediaMetadata{}); err != nil {
 		t.Fatal(err)
 	}
 	return dir, &Client{}, ms, media, at

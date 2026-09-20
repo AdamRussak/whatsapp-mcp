@@ -394,13 +394,26 @@ func (s *Server) handleDownloadBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// media_type selects the virtual "voice" type (audio with is_ptt) or plain audio.
+	// Only messages received since schema v1 carry is_ptt, so "voice" finds nothing in
+	// older history even where those messages are in fact voice notes.
+	var voiceOnly bool
+	switch strings.ToLower(strings.TrimSpace(req.MediaType)) {
+	case "", "audio":
+	case "voice":
+		voiceOnly = true
+	default:
+		SendJSONError(w, fmt.Sprintf("unsupported media_type %q (use \"audio\" or \"voice\")", req.MediaType), http.StatusBadRequest)
+		return
+	}
+
 	resolvedJIDs, err := whatsapp.ResolveChatJIDs(req.Chat, s.storeDir)
 	if err != nil {
 		SendJSONError(w, fmt.Sprintf("Failed to resolve chat JIDs: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	messages, err := s.messageStore.ListAudioMessages(resolvedJIDs, req.After, req.Before, limit)
+	messages, err := s.messageStore.ListAudioMessages(resolvedJIDs, req.After, req.Before, limit, voiceOnly)
 	if err != nil {
 		SendJSONError(w, fmt.Sprintf("Failed to list audio messages: %v", err), http.StatusInternalServerError)
 		return
@@ -528,7 +541,7 @@ func (s *Server) runBatchDownload(
 // writeBatchIndexJSON rebuilds index.json in the chat's media directory from every audio
 // message of the chat that has a media.db record, so earlier jobs' results are kept
 func (s *Server) writeBatchIndexJSON(outDir string, chatJIDs []string) {
-	messages, err := s.messageStore.ListAudioMessages(chatJIDs, "", "", 0)
+	messages, err := s.messageStore.ListAudioMessages(chatJIDs, "", "", 0, false)
 	if err != nil {
 		fmt.Printf("Failed to list audio messages for index.json: %v\n", err)
 		return

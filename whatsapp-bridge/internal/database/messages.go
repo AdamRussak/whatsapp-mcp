@@ -18,21 +18,56 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 	return err
 }
 
-// StoreMessage stores a message in the database
+// StoreMessage stores a message in the database.
+//
+// An existing row is never rewritten (§4.3): a history-sync replay of a message we
+// already hold only fills in schema-v1 metadata columns that are still NULL. Content,
+// timestamp, sender, filename, url and the decryption material stay as first stored.
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	media types.MediaMetadata) error {
 	// Only store if there's actual content or media
-	if content == "" && mediaType == "" {
+	if content == "" && media.MediaType == "" {
 		return nil
 	}
 
+	// Empty means "unknown" for the v1 columns, so store NULL and let a later replay that
+	// does carry the value fill it in. is_ptt is meaningful only for audio.
+	var isPTT interface{}
+	if media.MediaType == "audio" {
+		isPTT = media.IsPTT
+	}
+
 	_, err := store.db.Exec(
-		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+		`INSERT INTO messages
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length,
+		 direct_path, mimetype, seconds, is_ptt)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			direct_path = COALESCE(messages.direct_path, excluded.direct_path),
+			mimetype    = COALESCE(messages.mimetype,    excluded.mimetype),
+			seconds     = COALESCE(messages.seconds,     excluded.seconds),
+			is_ptt      = COALESCE(messages.is_ptt,      excluded.is_ptt)`,
+		id, chatJID, sender, content, timestamp, isFromMe, media.MediaType, media.Filename, media.URL,
+		media.MediaKey, media.FileSHA256, media.FileEncSHA256, media.FileLength,
+		nullIfEmpty(media.DirectPath), nullIfEmpty(media.Mimetype), nullIfZero(media.Seconds), isPTT,
 	)
 	return err
+}
+
+// nullIfEmpty stores an absent string as NULL, so COALESCE on a later replay can fill it.
+func nullIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nullIfZero stores an absent duration as NULL rather than a misleading 0.
+func nullIfZero(v uint32) interface{} {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 // GetMessages gets messages from a chat
@@ -194,8 +229,12 @@ func NormalizeTimeFilter(s string) (string, error) {
 	return "", fmt.Errorf("unrecognized time %q (use RFC 3339, \"YYYY-MM-DD HH:MM:SS\" or YYYY-MM-DD)", s)
 }
 
-// ListAudioMessages lists audio messages across the given chat JIDs (read-only)
-func (store *MessageStore) ListAudioMessages(chatJIDs []string, after, before string, limit int) ([]MediaInfo, error) {
+// ListAudioMessages lists audio messages across the given chat JIDs (read-only).
+//
+// voiceOnly narrows the result to voice notes (the virtual "voice" media type: audio with
+// is_ptt set). Only messages received since schema v1 carry is_ptt, so older history is
+// excluded by that filter even where it is in fact voice notes.
+func (store *MessageStore) ListAudioMessages(chatJIDs []string, after, before string, limit int, voiceOnly bool) ([]MediaInfo, error) {
 	if len(chatJIDs) == 0 {
 		return nil, nil
 	}
@@ -213,6 +252,10 @@ func (store *MessageStore) ListAudioMessages(chatJIDs []string, after, before st
 		args = append(args, jid)
 	}
 	query += strings.Join(placeholders, ",") + ")"
+
+	if voiceOnly {
+		query += " AND is_ptt = 1"
+	}
 
 	after, err := NormalizeTimeFilter(after)
 	if err != nil {

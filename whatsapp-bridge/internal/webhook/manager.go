@@ -17,20 +17,26 @@ import (
 
 // Manager handles webhook processing and delivery
 type Manager struct {
-	messageStore *database.MessageStore
-	logger       waLog.Logger
-	configs      []*types.WebhookConfig
-	mutex        sync.RWMutex
-	delivery     *DeliveryService
+	messageStore  *database.MessageStore
+	logger        waLog.Logger
+	configs       []*types.WebhookConfig
+	mutex         sync.RWMutex
+	delivery      *DeliveryService
+	publicBaseURL string
 }
 
-// NewManager creates a new webhook manager
-func NewManager(messageStore *database.MessageStore, logger waLog.Logger) *Manager {
+// NewManager creates a new webhook manager. publicBaseURL is the address webhook
+// consumers can reach this bridge on; it appears in media_download_url.
+func NewManager(messageStore *database.MessageStore, logger waLog.Logger, publicBaseURL string) *Manager {
+	if publicBaseURL == "" {
+		publicBaseURL = "http://localhost:8080"
+	}
 	return &Manager{
-		messageStore: messageStore,
-		logger:       logger,
-		configs:      make([]*types.WebhookConfig, 0),
-		delivery:     NewDeliveryService(messageStore, logger),
+		messageStore:  messageStore,
+		logger:        logger,
+		configs:       make([]*types.WebhookConfig, 0),
+		delivery:      NewDeliveryService(messageStore, logger),
+		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 	}
 }
 
@@ -79,7 +85,7 @@ func (wm *Manager) MatchesTriggers(msg *events.Message, chatName string) []*type
 
 	// Extract message content
 	content := whatsapp.ExtractTextContent(msg.Message)
-	mediaType, _, _, _, _, _, _ := whatsapp.ExtractMediaInfo(msg.Message)
+	mediaType := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID).MediaType
 
 	for _, config := range wm.configs {
 		if !config.Enabled {
@@ -170,7 +176,8 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 
 	// Extract message content and media info
 	content := whatsapp.ExtractTextContent(msg.Message)
-	mediaType, filename, _, _, _, _, _ := whatsapp.ExtractMediaInfo(msg.Message)
+	media := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID)
+	mediaType, filename := media.MediaType, media.Filename
 
 	// Determine sender name
 	senderName := msg.Info.Sender.User
@@ -200,6 +207,8 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 			IsFromMe:     msg.Info.IsFromMe,
 			MediaType:    mediaType,
 			Filename:     filename,
+			IsPTT:        media.IsPTT,
+			Seconds:      media.Seconds,
 			PollInfo:     pollInfo,
 			PollVoteInfo: pollVoteInfo,
 		},
@@ -210,7 +219,7 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 
 	// Add media download URL if it's a media message (not polls)
 	if mediaType != "" && mediaType != "poll" && mediaType != "poll_vote" {
-		basePayload.Message.MediaDownloadURL = "http://localhost:8080/api/download"
+		basePayload.Message.MediaDownloadURL = wm.publicBaseURL + "/api/download"
 	}
 
 	// Add group info if it's a group chat
@@ -227,7 +236,7 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 		// Find the specific trigger that matched
 		var matchedTrigger *types.WebhookTrigger
 		content := whatsapp.ExtractTextContent(msg.Message)
-		mediaType, _, _, _, _, _, _ := whatsapp.ExtractMediaInfo(msg.Message)
+		mediaType := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID).MediaType
 
 		for _, trigger := range config.Triggers {
 			if trigger.Enabled && wm.matchesTrigger(trigger, msg, content, mediaType, chatName) {

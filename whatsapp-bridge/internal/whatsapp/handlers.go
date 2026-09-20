@@ -115,7 +115,8 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 	content := ExtractTextContent(msg.Message)
 
 	// Extract media info
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := ExtractMediaInfo(msg.Message)
+	media := ExtractMediaInfo(msg.Message, msg.Info.ID)
+	mediaType := media.MediaType
 
 	// Handle poll vote messages - attempt to decrypt the vote
 	var pollVoteInfo *types.PollVoteInfo
@@ -143,7 +144,7 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 				for _, hash := range decryptedVote.GetSelectedOptions() {
 					hashHex := fmt.Sprintf("%x", hash)
 					pollVoteInfo.SelectedHashes = append(pollVoteInfo.SelectedHashes, hashHex)
-					
+
 					// Look up option name from database
 					optName, err := messageStore.GetPollOptionName(creationMsgID, hashHex)
 					if err == nil && optName != "" {
@@ -192,13 +193,7 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 		content,
 		msg.Info.Timestamp,
 		msg.Info.IsFromMe,
-		mediaType,
-		filename,
-		url,
-		mediaKey,
-		fileSHA256,
-		fileEncSHA256,
-		fileLength,
+		media,
 	)
 
 	if err != nil {
@@ -217,7 +212,7 @@ func (c *Client) HandleMessage(messageStore *database.MessageStore, webhookManag
 		} else if mediaType == "poll_vote" {
 			fmt.Printf("[%s] %s %s: [POLL VOTE] %s\n", timestamp, direction, sender, content)
 		} else if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
+			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, media.Filename, content)
 		} else if content != "" {
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
 		}
@@ -292,14 +287,18 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 					}
 				}
 
-				// Extract media info
-				var mediaType, filename, url string
-				var mediaKey, fileSHA256, fileEncSHA256 []byte
-				var fileLength uint64
-
-				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = ExtractMediaInfo(msg.Message.Message)
+				// Store message
+				msgID := ""
+				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
+					msgID = *msg.Message.Key.ID
 				}
+
+				// Extract media info
+				var media types.MediaMetadata
+				if msg.Message.Message != nil {
+					media = ExtractMediaInfo(msg.Message.Message, msgID)
+				}
+				mediaType := media.MediaType
 
 				// Log the message content for debugging
 				c.logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
@@ -327,12 +326,6 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 					sender = jid.User
 				}
 
-				// Store message
-				msgID := ""
-				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
-					msgID = *msg.Message.Key.ID
-				}
-
 				// Get message timestamp
 				timestamp := time.Time{}
 				if ts := msg.Message.GetMessageTimestamp(); ts != 0 {
@@ -348,13 +341,7 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 					content,
 					timestamp,
 					isFromMe,
-					mediaType,
-					filename,
-					url,
-					mediaKey,
-					fileSHA256,
-					fileEncSHA256,
-					fileLength,
+					media,
 				)
 				if err != nil {
 					c.logger.Warnf("Failed to store history message: %v", err)
@@ -363,7 +350,7 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 					// Log successful message storage
 					if mediaType != "" {
 						c.logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
+							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, media.Filename, content)
 					} else {
 						c.logger.Infof("Stored message: [%s] %s -> %s: %s",
 							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)

@@ -14,6 +14,10 @@ services:
       - ./store:/app/whatsapp-bridge/store  # Persistent storage for WhatsApp data
     environment:
       - TZ=UTC
+      # Base URL used in download_url and webhook media_download_url. The container DNS
+      # name is what the MCP server and other services on whatsapp_internal can reach;
+      # localhost would only have worked inside the bridge container itself.
+      - PUBLIC_BASE_URL=http://whatsapp-mcp-whatsapp-bridge-1:8080
     restart: unless-stopped
     healthcheck:
       # Probes the bridge HTTP port; a non-responsive process gets marked unhealthy

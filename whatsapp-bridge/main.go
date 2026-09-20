@@ -25,13 +25,20 @@ func main() {
 	// Load configuration
 	cfg := config.NewConfig()
 
-	// Initialize database
+	// Initialize database (this also applies schema migrations)
 	messageStore, err := database.NewMessageStore()
 	if err != nil {
+		// Exit non-zero: never serve on a half-migrated database (§4.2)
 		logger.Errorf("Failed to initialize message store: %v", err)
-		return
+		os.Exit(1)
 	}
 	defer messageStore.Close()
+
+	if v, err := messageStore.SchemaVersion(); err != nil {
+		logger.Warnf("Failed to read schema version: %v", err)
+	} else {
+		logger.Infof("messages.db schema version %d", v)
+	}
 
 	// Initialize media store for download tracking (store/media.db)
 	mediaStore, err := database.NewMediaStore(cfg.StoreDir)
@@ -57,7 +64,7 @@ func main() {
 	client.SetMediaRetryTimeout(time.Duration(cfg.MediaRetryTimeoutS) * time.Second)
 
 	// Initialize webhook manager
-	webhookManager := webhook.NewManager(messageStore, logger)
+	webhookManager := webhook.NewManager(messageStore, logger, cfg.PublicBaseURL)
 	err = webhookManager.LoadWebhookConfigs()
 	if err != nil {
 		logger.Errorf("Failed to load webhook configs: %v", err)

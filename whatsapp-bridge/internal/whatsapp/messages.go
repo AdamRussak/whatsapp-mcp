@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"whatsapp-bridge/internal/database"
+	bridgetypes "whatsapp-bridge/internal/types"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -207,17 +208,11 @@ func (c *Client) SendMessage(messageStore *database.MessageStore, recipient stri
 	err = messageStore.StoreMessage(
 		sendResp.ID, // Use the ID from SendResponse
 		recipientJID.String(),
-		c.Store.ID.User,       // Use the client's user ID as sender
-		msg.GetConversation(), // Use the conversation text
-		sendResp.Timestamp,    // Use the Timestamp from SendResponse
-		true,                  // IsFromMe is true since we are sending this message
-		"",
-		"",
-		"",
-		nil, // Replace "" with nil for []byte arguments
-		nil, // Replace "" with nil for []byte arguments
-		nil, // Replace "" with nil for []byte arguments
-		0,
+		c.Store.ID.User,             // Use the client's user ID as sender
+		msg.GetConversation(),       // Use the conversation text
+		sendResp.Timestamp,          // Use the Timestamp from SendResponse
+		true,                        // IsFromMe is true since we are sending this message
+		bridgetypes.MediaMetadata{}, // text message, no media
 	)
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
