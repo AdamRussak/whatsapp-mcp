@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-21:** Milestone 1 and **Phases 0 and 1 are complete and deployed.** Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Next: see §2.12** — the recommendation is to bring Phase 4 (auto-download) forward, because the CDN window means only newly arriving voice notes can still be captured. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
+**Status as of 2026-09-21:** Milestone 1, **Phases 0 and 1 are complete and deployed**, and the **backlog sweep (§2.13) is complete** (164/164 recent uncaptured audio files recovered with 0 failures). Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Next: Phase 4 (auto-download)** — now that the existing backlog is 100% captured, Phase 4 will prevent future leakage as new voice notes arrive. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -272,12 +272,29 @@ Those 164 are recoverable today and will not be recoverable next week. 3,619 ite
 
 **B. Then Phase 4 (auto-download, goal G2) — brought forward, sliced.** This is the only change that stops the leak permanently, which is why it should come before Phases 5 and 2/3:
 
-- **4a — capture, no schema.** `AUTO_DOWNLOAD_VOICE=none|all|rules` plus an allowlist in config; a small worker pool fed from `HandleMessage` *after* the message is stored (never inside the whatsmeow event handler, §4.5); each job calls the existing `DownloadMedia`. No migration, no API, no UI. That alone secures every new voice note.
-- **4b — rules and control.** Schema v2 (`auto_download_rules`, `auto_download_triggers`, `auto_download_logs`), `matchesTrigger` moved to `internal/matcher` and shared with webhooks, the REST endpoints, the UI tab and the MCP tools.
+- **One listener model, no throwaway step.** Auto-download becomes an *action* on the webhook trigger rules that already exist: a new `auto_download` checkbox on an ordinary webhook entry, defined in the same UI and the same `POST /api/webhooks` as every event today. The earlier env-var slice (`AUTO_DOWNLOAD_VOICE` + an allowlist in `docker-compose.yaml`, shipped first and deleted later) is dropped — see **Phase 4** in §6 for the full design.
 
-**Why this re-orders the documented plan.** Phase 5's history request is explicitly low-payoff: B1 means resent history most likely comes back re-keyed (§2.5 option 2). Phase 2/3 is ergonomics over a capability that already works through the API. Neither stops the leak; 4a does, and it is smaller than either.
+**Why this re-orders the documented plan.** Phase 5's history request is explicitly low-payoff: B1 means resent history most likely comes back re-keyed (§2.5 option 2). Phase 2/3 is ergonomics over a capability that already works through the API. Neither stops the leak; Phase 4 does, and it is smaller than either.
 
 **Cheap parity fix worth folding in wherever it lands:** the MCP tool `batch_download_chat_audio` still exposes only `chat`, `limit`, `skip_cached`, `retry_failed`, so `media_type`/`voice`, `after`, `before` and `skip_media_retry` are unreachable from the MCP side (§5.2).
+
+### 2.13 Backlog sweep complete ✅ (2026-09-21, 10:54–10:56 UTC)
+
+Part A executed cleanly with zero code changes.
+
+- **Execution:** Backlog sweep looped over all 35 chats with uncaptured audio messages from the last 14 days (`after: "2026-09-07"`, `skip_cached: true`, `skip_media_retry: true`).
+- **Result:** **164 of 164 uncaptured items downloaded directly (100% success rate)** across all 35 chats in 100.2 seconds.
+- **Failures / Retries:** **0 failed, 0 retry receipts sent to phones.**
+- **Recent audio coverage (last 14 days):** 268 total audio messages in `messages.db` across the entire account; **268 / 268 now downloaded (`ok`)**. The leak is completely stopped for the recoverable window.
+- **`media.db` status totals:**
+  - `ok`: **268** (104 pre-existing + 164 from this sweep)
+  - `rekeyed_on_phone`: 339 (from earlier Milestone 1 run on older history)
+  - `expired_not_on_phone`: 1
+  - `failed`: 3,619 (0 new failures added)
+  - `retry_timeout`: 1
+- **Files on disk:** 279 audio files in `store/media/` across 36 chat folders (276 valid `OggS` Opus voice notes + 3 valid MPEG AAC audio forwarded in groups), each with updated `index.json`.
+- **Database safety:** `messages.db` and `whatsapp.db` byte/table integrity fully preserved (0 writes to `messages.db`).
+- **Next:** Part B — Phase 4 (auto-download) to capture incoming voice notes live as they arrive.
 
 ---
 
@@ -592,12 +609,57 @@ Only needed for live `is_ptt` tagging and auto-download; history download does n
 
 ### Phase 4 — Auto-download rules (G2) ❌
 
-- Move `matchesTrigger`/`matchesString` to `internal/matcher`, shared by webhooks and auto-download; add `voice` media type.
-- Schema v2: `auto_download_rules(id, name, enabled, media_types DEFAULT 'voice', created_at, updated_at)`, `auto_download_triggers(id, rule_id, trigger_type, trigger_value, match_type DEFAULT 'exact', enabled)`, `auto_download_logs(rule_id, message_id, chat_jid, status, error, duration_ms)`. Optional YAML seed next to `webhooks.yaml.example`.
-- Config: `AUTO_DOWNLOAD_VOICE=none|rules|all` (default `rules`), `AUTO_DOWNLOAD_WORKERS=2`, `AUTO_DOWNLOAD_RETENTION_DAYS`.
-- `internal/autodownload/manager.go`: match in `HandleMessage` after storing, enqueue to a buffered channel, worker pool calls `DownloadMedia` with a 2-min timeout. Optionally fire webhooks with `download_url` filled in.
-- API `GET/POST /api/auto-download`, `PUT/DELETE /api/auto-download/{id}`, `GET /api/auto-download-logs`; "Auto-download" tab in `whatsapp-webhook-ui/`; MCP tools `list_/add_/remove_auto_download_rule`.
-- Verify: rule for a test sender → their voice note appears within seconds with a success log row; another sender's does not.
+**A listener is an ordinary webhook entry with a new checkbox ticked.** Decided 2026-09-21: auto-download is not a second rule engine with its own tables, endpoints and UI page. It is an *action* on the trigger rules that already exist. You define who gets captured exactly the way you define an event today — the same form in `whatsapp-webhook-ui`, the same `POST /api/webhooks`, the same `webhook_triggers` rows, matched by the same `Manager.matchesTrigger`. The webhook part stays optional: a config with `auto_download` on and an empty URL is a download-only listener.
+
+The env-var slice (`AUTO_DOWNLOAD_VOICE=none|all|rules` + `AUTO_DOWNLOAD_ALLOWLIST`, a "4a" shipped before the rules) is **dropped**. §2.13 left the recoverable backlog at 100% captured, so there is no gap that justifies a mechanism whose whole implementation — parsing, tests, compose entries, docs — gets deleted a week later. Rules live in `messages.db`, so adding a contact is a click that takes effect on the next message (all four CRUD paths already call `LoadWebhookConfigs`), not a compose edit and a container restart.
+
+**Schema v2** (`messages.db`, additive per §4.2) — two columns on `webhook_configs`:
+
+```sql
+ALTER TABLE webhook_configs ADD COLUMN auto_download BOOLEAN DEFAULT 0;
+ALTER TABLE webhook_configs ADD COLUMN auto_download_voice_only BOOLEAN DEFAULT 1;
+```
+
+The same two columns go into `createTables` for a fresh database; `createTables` runs before `runMigrations`, and `addColumns` skips what `PRAGMA table_info` already shows, so v2 is then a no-op. No `auto_download_rules`, no `auto_download_triggers`, no `auto_download_logs` — per-message outcomes already have an honest home in `media.db.media_downloads` (`ok` / `failed` / `rekeyed_on_phone` / …). Rule attribution lives in the bridge log only; that is the accepted cost of not building a second logs table.
+
+**What fires the download.** `webhook.Manager.ProcessMessage` already runs after `StoreMessage` (`handlers.go:219`) and already computes the matched configs. The trigger picks the *who*; the rule's own flags pick the *what*:
+
+```
+enqueue ⟺ config.Enabled ∧ config.AutoDownload
+        ∧ media.MediaType == "audio"
+        ∧ (¬config.AutoDownloadVoiceOnly ∨ media.IsPTT)
+        ∧ (media.URL ≠ "" ∨ media.DirectPath ≠ "")   // view-once carries neither (§2.11)
+```
+
+So a `sender` trigger that also matches text messages is fine — text never reaches the queue. A `media_type=audio` trigger is allowed but not required. Both directions are captured; restrict with a `sender` trigger if you only want theirs. Two matching rules enqueue **one** job (in-flight set keyed by `message_id`+`chat_jid`), and `DownloadMedia`'s cache check makes a duplicate harmless anyway.
+
+**`internal/autodownload/manager.go`** — buffered channel + worker pool, the §4.5 invariant kept: enqueue is a `select`/`default` non-blocking send, so the whatsmeow event handler is never delayed; a full queue logs a warning and drops. Workers call the downloader with `SkipMediaRetry: true` — live media is seconds old, the direct path always works, and this guarantees no retry receipt is ever sent to a phone (§2.13 held that at 0). The manager takes a narrow interface, not the client:
+
+```go
+type Downloader interface {
+    DownloadVoice(ctx context.Context, messageID, chatJID string) (*Result, error)
+}
+```
+
+`main.go` passes an adapter closing over `client`, `mediaStore`, `messageStore` and `storeDir`; tests pass a fake. `webhookManager.SetAutoDownloader(adm)` keeps `NewManager`'s signature (and its call sites) unchanged. `Stop()` cancels, drains and `wg.Wait()`s before `client.Disconnect()`.
+
+**Config** (ops knobs only — never *who*): `AUTO_DOWNLOAD=on|off` (default `on`, a kill switch that does not touch any rule), `AUTO_DOWNLOAD_WORKERS=2`, `AUTO_DOWNLOAD_QUEUE_SIZE=100`, `AUTO_DOWNLOAD_TIMEOUT_S=60`. Plus the still-open `stop_grace_period: 30s` on the bridge (§4.5).
+
+**API:** no new endpoints. `POST`/`PUT /api/webhooks` carry `auto_download` and `auto_download_voice_only`. Two consequences to implement:
+- `ValidateWebhookConfig`: `webhook_url` is required **unless** `auto_download` is true. `TestWebhook` on a URL-less config → 400.
+- `ProcessMessage`: skip delivery when `WebhookURL == ""` (the config is a download-only listener).
+- `auto_download_voice_only` is `*bool` in `types.WebhookConfig`: absent in JSON → `true`, matching the column default. A plain `bool` would silently mean "all audio" for every client that omits the field.
+- `StoreWebhookConfig` / `GetWebhookConfig` / `GetAllWebhookConfigs` / `UpdateWebhookConfig` list the new columns explicitly (`SELECT *` stays banned, `TestNoForbiddenSQL`).
+
+**UI** (`whatsapp-webhook-ui/`): two checkboxes in the existing form — "Auto-download matched media" and "Voice notes only" (shown when the first is ticked) — the URL field's `required` moved from HTML to JS so it can be waived, and an "Auto-download" badge on the card. No new tab, no second form, no second logs modal.
+
+**Follow-up, not in scope:** deliver the webhook *after* the file lands so `media_download_url` points at the finished `/api/media/<chat>/<file>`. Not needed for correctness — `media_download_url` is the `POST /api/download` endpoint, which returns a cache hit once the worker is done.
+
+**Deploy:** touches `store.go` + a migration → the full §4.6 checklist, rehearsed with `cmd/migrate` on `store-test`, image tagged `whatsapp-bridge:pre-phase4`.
+
+**Tests:** migration v2 (columns added, existing `webhook_configs` rows byte-identical, re-open is a no-op); config round-trip incl. `voice_only` nil → true; validation (URL optional with `auto_download`, still required without, test-webhook refused without a URL); the enqueue gate (ptt ✅, non-ptt audio ✅/❌ per flag, image ❌, text from a matching sender ❌, view-once ❌, disabled config ❌, matched-but-`auto_download`-off ❌); full queue does not block; two matching rules → one job; worker calls the downloader with `SkipMediaRetry` and honours the timeout. Existing guard tests (`TestNoForbiddenSQL`, download-only-reads-`messages`) must stay green.
+
+**Verify live:** tick auto-download on a rule for one test sender → their next voice note appears in `store/media/<chat>/` within seconds with an `ok` row in `media.db`; a voice note from any other chat produces nothing; `messages.db` row count and `quick_check` unchanged.
 
 ### Phase 5 — Batch by sender, missing history 🟡
 
