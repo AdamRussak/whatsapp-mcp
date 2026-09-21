@@ -218,3 +218,70 @@ func TestWebhookConfigVoiceOnlyDefaultsToTrue(t *testing.T) {
 		t.Fatal("an unset auto_download_voice_only was stored as false; it must default to true")
 	}
 }
+
+// Trigger mode round-trips through create and update, and an unset mode is stored as "or".
+func TestWebhookTriggerModeRoundTrip(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	config := &types.WebhookConfig{Name: "l", WebhookURL: "https://example.com", Enabled: true}
+	if err := store.StoreWebhookConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetWebhookConfig(config.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TriggerMode != "or" {
+		t.Fatalf("unset trigger_mode stored as %q, want or", got.TriggerMode)
+	}
+
+	config.TriggerMode = "and"
+	if err := store.UpdateWebhookConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	all, err := store.GetAllWebhookConfigs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].TriggerMode != "and" {
+		t.Fatalf("after update: %+v", all)
+	}
+}
+
+// Triggers come back in the order they were saved: the payload's "first matching trigger"
+// depends on it.
+func TestWebhookTriggersKeepSavedOrder(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	values := []string{"z", "a", "m", "b", "y"}
+	config := &types.WebhookConfig{Name: "l", WebhookURL: "https://example.com", Enabled: true}
+	for _, v := range values {
+		config.Triggers = append(config.Triggers, types.WebhookTrigger{
+			TriggerType: "keyword", TriggerValue: v, MatchType: "exact", Enabled: true,
+		})
+	}
+	if err := store.StoreWebhookConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	// Update rewrites every trigger; the order must survive that too.
+	if err := store.UpdateWebhookConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetWebhookTriggers(config.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, trigger := range got {
+		if trigger.TriggerValue != values[i] {
+			t.Fatalf("trigger %d = %q, want %q (order %v)", i, trigger.TriggerValue, values[i], got)
+		}
+	}
+}

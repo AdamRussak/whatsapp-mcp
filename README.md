@@ -354,8 +354,12 @@ POST /api/webhooks
   "webhook_url": "https://example.com/webhook",
   "secret_token": "optional-secret",
   "enabled": true,
+  "trigger_mode": "or",   # or "and": every enabled trigger must match
   "triggers": [...]
 }
+
+# Check a listener without saving it: the same 400 a save would give, listing every problem
+POST /api/webhooks/validate
 
 # Test webhook
 POST /api/webhooks/{id}/test

@@ -10,77 +10,96 @@ import (
 	"whatsapp-bridge/internal/types"
 )
 
-// ValidateWebhookConfig validates a webhook configuration
+// ValidateWebhookConfig validates a webhook configuration. It collects every failure rather
+// than stopping at the first, and returns them as ValidationErrors (nil when valid), so
+// the form can show each one next to the trigger it concerns.
+//
+// The basic checks come first: name, URL, retention, trigger_mode and each trigger's
+// syntax. Only when every trigger passes those do R1–R6 (ADR 0001) run, since they reason
+// about what the triggers could match.
 func (wm *Manager) ValidateWebhookConfig(config *types.WebhookConfig) error {
-	if config.Name == "" {
-		return fmt.Errorf("webhook name is required")
+	var errs ValidationErrors
+	form := func(format string, args ...interface{}) {
+		errs = append(errs, ValidationError{TriggerIndex: -1, Message: fmt.Sprintf(format, args...)})
 	}
 
-	if len(config.Name) > 255 {
-		return fmt.Errorf("webhook name must be less than 256 characters")
+	if config.Name == "" {
+		form("webhook name is required")
+	} else if len(config.Name) > 255 {
+		form("webhook name must be less than 256 characters")
 	}
 
 	// A config with auto-download on is a valid listener without a URL: it captures the
 	// matched media and delivers nothing. Any other config still needs somewhere to post.
 	if config.WebhookURL == "" && !config.AutoDownload {
-		return fmt.Errorf("webhook URL is required unless auto-download is enabled")
+		form("webhook URL is required unless auto-download is enabled")
 	}
 
 	if config.WebhookURL != "" {
 		if len(config.WebhookURL) > 2048 {
-			return fmt.Errorf("webhook URL must be less than 2048 characters")
-		}
-
-		if !strings.HasPrefix(config.WebhookURL, "http://") && !strings.HasPrefix(config.WebhookURL, "https://") {
-			return fmt.Errorf("webhook URL must start with http:// or https://")
+			form("webhook URL must be less than 2048 characters")
+		} else if !strings.HasPrefix(config.WebhookURL, "http://") && !strings.HasPrefix(config.WebhookURL, "https://") {
+			form("webhook URL must start with http:// or https://")
 		}
 	}
 
 	// Ten years is a generous ceiling; the point is to catch a typo, not to limit anyone.
 	if config.RetentionDays < 0 || config.RetentionDays > 3650 {
-		return fmt.Errorf("retention_days must be between 0 (keep forever) and 3650")
+		form("retention_days must be between 0 (keep forever) and 3650")
 	}
 
-	// Validate triggers
-	for _, trigger := range config.Triggers {
-		if trigger.TriggerType == "" {
-			return fmt.Errorf("trigger type is required")
-		}
+	// Anything but "or" or "and" is refused, never quietly treated as OR.
+	mode := config.Mode()
+	modeOK := mode == types.TriggerModeOr || mode == types.TriggerModeAnd
+	if !modeOK {
+		form(`trigger_mode must be "or" or "and", not %q`, config.TriggerMode)
+	}
 
-		validTypes := []string{"all", "chat_jid", "sender", "keyword", "media_type"}
-		valid := false
-		for _, validType := range validTypes {
-			if trigger.TriggerType == validType {
-				valid = true
-				break
-			}
+	triggersOK := true
+	for i, trigger := range config.Triggers {
+		if msg := triggerSyntaxProblem(trigger); msg != "" {
+			errs = append(errs, ValidationError{TriggerIndex: i, Message: msg})
+			triggersOK = false
 		}
-		if !valid {
-			return fmt.Errorf("invalid trigger type: %s", trigger.TriggerType)
-		}
+	}
+	if triggersOK {
+		errs = append(errs, wm.checkTriggerRules(config, modeOK)...)
+	}
 
-		validMatchTypes := []string{"exact", "contains", "regex"}
-		valid = false
-		for _, validType := range validMatchTypes {
-			if trigger.MatchType == validType {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			return fmt.Errorf("invalid match type: %s", trigger.MatchType)
-		}
+	if len(errs) == 0 {
+		return nil
+	}
+	return errs
+}
 
-		// Test regex patterns
-		if trigger.MatchType == "regex" && trigger.TriggerValue != "" {
-			_, err := regexp.Compile(trigger.TriggerValue)
-			if err != nil {
-				return fmt.Errorf("invalid regex pattern '%s': %v", trigger.TriggerValue, err)
-			}
+// triggerSyntaxProblem checks one trigger on its own: a known type and match type, a regex
+// that compiles, and a value on an enabled trigger that needs one. An empty value is not
+// harmless: "contains" nothing matches every message.
+func triggerSyntaxProblem(trigger types.WebhookTrigger) string {
+	switch trigger.TriggerType {
+	case "":
+		return "trigger type is required"
+	case "all", "chat_jid", "sender", "keyword", "media_type":
+	default:
+		return fmt.Sprintf("invalid trigger type: %s", trigger.TriggerType)
+	}
+
+	switch trigger.MatchType {
+	case "exact", "contains", "regex":
+	default:
+		return fmt.Sprintf("invalid match type: %s", trigger.MatchType)
+	}
+
+	if trigger.MatchType == "regex" && trigger.TriggerValue != "" {
+		if _, err := regexp.Compile(trigger.TriggerValue); err != nil {
+			return fmt.Sprintf("invalid regex pattern '%s': %v", trigger.TriggerValue, err)
 		}
 	}
 
-	return nil
+	if trigger.Enabled && trigger.TriggerType != "all" && strings.TrimSpace(trigger.TriggerValue) == "" {
+		return "enter a value for this trigger, or remove it"
+	}
+	return ""
 }
 
 // TestWebhook sends a test webhook to verify connectivity

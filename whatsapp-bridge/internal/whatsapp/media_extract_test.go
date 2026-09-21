@@ -135,3 +135,35 @@ func TestExtractMediaInfoOtherTypes(t *testing.T) {
 		t.Errorf("document filename = %q, want report.pdf", got)
 	}
 }
+
+// Every media type ExtractMediaInfo returns is in ProducedMediaTypes, which listener
+// validation treats as the closed set of what a message can be (ADR 0001, R1 and R5).
+func TestProducedMediaTypesCoverExtractMediaInfo(t *testing.T) {
+	msgs := map[string]*waProto.Message{
+		"poll":      {PollCreationMessage: &waProto.PollCreationMessage{Name: proto.String("q")}},
+		"poll_vote": {PollUpdateMessage: &waProto.PollUpdateMessage{}},
+		"image":     {ImageMessage: &waProto.ImageMessage{URL: proto.String("u")}},
+		"video":     {VideoMessage: &waProto.VideoMessage{URL: proto.String("u")}},
+		"audio":     {AudioMessage: &waProto.AudioMessage{URL: proto.String("u")}},
+		"document":  {DocumentMessage: &waProto.DocumentMessage{URL: proto.String("u")}},
+		"text":      {Conversation: proto.String("hi")},
+		"sticker":   {StickerMessage: &waProto.StickerMessage{URL: proto.String("u")}},
+	}
+	produced := make(map[string]bool)
+	for _, mt := range ProducedMediaTypes {
+		produced[mt] = true
+	}
+	seen := make(map[string]bool)
+	for name, msg := range msgs {
+		mt := ExtractMediaInfo(msg, "M1").MediaType
+		if mt != "" && !produced[mt] {
+			t.Errorf("%s: ExtractMediaInfo returned %q, which ProducedMediaTypes does not list", name, mt)
+		}
+		seen[mt] = true
+	}
+	for _, mt := range ProducedMediaTypes {
+		if !seen[mt] {
+			t.Errorf("ProducedMediaTypes lists %q, but no message here produces it", mt)
+		}
+	}
+}

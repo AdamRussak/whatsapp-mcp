@@ -52,6 +52,7 @@ Content-Type: application/json
   "webhook_url": "https://example.com/webhook",
   "secret_token": "optional-secret",
   "enabled": true,
+  "trigger_mode": "or",
   "triggers": [
     {
       "trigger_type": "keyword",
@@ -62,6 +63,40 @@ Content-Type: application/json
   ]
 }
 ```
+
+`trigger_mode` says how the triggers combine (ADR 0001): `"or"`, the default when absent,
+fires when **any** enabled trigger matches; `"and"` fires only when **every** enabled trigger
+matches (`all` adds no requirement). Any other value is a 400.
+
+A listener that no message could ever fire is refused with a **400** that lists every
+problem, each with its rule and the index of the trigger in `triggers` (or `-1` when it is
+not about one trigger). `error` is the first message:
+
+```json
+{"success": false, "error": "R3: A message belongs to one chat, ...", "errors": [
+  {"rule": "R3", "trigger_index": 1, "message": "R3: A message belongs to one chat, ..."}
+]}
+```
+
+| Rule | Mode | Refused |
+|---|---|---|
+| R1 | both | a media type the bridge never produces (`sticker`, a typo) |
+| R2 | both | auto-download on, but no audio message could fire the listener |
+| R3 | AND | two different chats, senders or media types (a phone number and its LID are one contact) |
+| R4 | AND | a `contains`/`regex` that cannot match the `exact` value on the same field |
+| R5 | AND | media-type triggers that no one media type satisfies |
+| R6 | AND | a keyword beside media triggers that allow no text (keywords read plain text and poll questions, not captions) |
+
+An enabled trigger other than `all` also needs a value.
+
+#### Validate Without Saving
+```bash
+POST /api/webhooks/validate
+```
+
+Runs the same checks as create and update on the body and writes nothing: `200`
+`{"success": true, "errors": []}`, or the same 400 as a save. The UI calls it as the form
+changes.
 
 #### Get Specific Webhook
 ```bash
@@ -126,6 +161,10 @@ When a message matches a webhook trigger, the following JSON payload is sent:
     "value": "urgent",
     "match_type": "contains"
   },
+  "matched_triggers": [
+    {"type": "keyword", "value": "urgent", "match_type": "contains"}
+  ],
+  "trigger_mode": "or",
   "message": {
     "id": "message-id-123",
     "chat_jid": "1234567890@s.whatsapp.net",
@@ -150,6 +189,10 @@ When a message matches a webhook trigger, the following JSON payload is sent:
   }
 }
 ```
+
+`trigger` is the first trigger that matched, in the order the listener's triggers were
+saved; its shape is unchanged, so existing consumers keep working. `matched_triggers` lists
+every trigger that matched: one entry under `"or"`, every enabled trigger under `"and"`.
 
 ## Security
 

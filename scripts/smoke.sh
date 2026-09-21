@@ -7,7 +7,7 @@
 #
 # Usage:
 #   scripts/smoke.sh                       # expects the schema version the repo is at
-#   EXPECT_SCHEMA=4 scripts/smoke.sh
+#   EXPECT_SCHEMA=5 scripts/smoke.sh
 #   BRIDGE=http://host:8080 UI=http://host:8089 scripts/smoke.sh
 #
 # Exits non-zero on the first failed check. Needs only curl and python3.
@@ -17,7 +17,7 @@ set -uo pipefail
 BRIDGE="${BRIDGE:-http://localhost:8080}"
 UI="${UI:-http://localhost:8089}"
 # Bump this when a migration ships; it is the deploy's proof of life.
-EXPECT_SCHEMA="${EXPECT_SCHEMA:-4}"
+EXPECT_SCHEMA="${EXPECT_SCHEMA:-5}"
 
 pass=0
 fail=0
@@ -89,6 +89,13 @@ if [ "$STATUS" = "200" ]; then
   else
     bad "$missing listener(s) missing auto_download fields — stale bridge binary"
   fi
+  # ...and the schema-v5 match mode, which is always "or" or "and".
+  badmode="$(printf '%s' "$webhooks" | json "sum(1 for c in (d.get('data') or []) if c.get('trigger_mode') not in ('or', 'and'))")"
+  if [ "$badmode" = "0" ]; then
+    ok "every listener carries trigger_mode"
+  else
+    bad "$badmode listener(s) without a valid trigger_mode — stale bridge binary"
+  fi
 else
   bad "/api/webhooks returned $STATUS"
 fi
@@ -107,7 +114,7 @@ if [ "$STATUS" = "200" ]; then
   # Substring matching in the shell, not `printf | grep -q`: grep exits on its first match,
   # printf takes SIGPIPE, and with `pipefail` the pipeline reports failure — so an early
   # match looks like a miss. That bug made this script report a stale UI that was fine.
-  for marker in autoDownload autoDownloadVoiceOnly voiceOnlyGroup downloadsView retentionGroup; do
+  for marker in autoDownload autoDownloadVoiceOnly voiceOnlyGroup downloadsView retentionGroup triggerMode triggerSummary; do
     if [[ "$index" == *"$marker"* ]]; then
       ok "index.html has $marker"
     else

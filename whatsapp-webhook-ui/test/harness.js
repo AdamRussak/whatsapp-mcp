@@ -21,7 +21,7 @@ const DEFAULT_ROUTES = {
     '/api/chats': { body: { success: true, data: [] } },
     '/api/downloads': { body: { success: true, data: [], total: 0 } },
     '/api/health': {
-        body: { success: true, schema_version: 4, retention: { enabled: true, dry_run: false, interval_minutes: 60 } },
+        body: { success: true, schema_version: 5, retention: { enabled: true, dry_run: false, interval_minutes: 60 } },
     },
 };
 
@@ -35,7 +35,7 @@ async function settle(window) {
 // createPage returns { window, document, manager, calls, settle, close }.
 //
 // routes maps "METHOD /path" or "/path" to either { status, body } or a function
-// (url, options) => { status, body }.
+// (url, options) => { status, body }, or a promise of one.
 async function createPage(routes = {}) {
     const dom = new JSDOM(HTML, {
         url: 'http://localhost:8089/',
@@ -59,7 +59,8 @@ async function createPage(routes = {}) {
         calls.push({ url, method, body: options.body ? JSON.parse(options.body) : undefined });
 
         const handler = routes[`${method} ${url.pathname}`] ?? routes[url.pathname] ?? DEFAULT_ROUTES[url.pathname];
-        const result = typeof handler === 'function' ? handler(url, options) : handler;
+        // A handler may return a promise, to hold a response back while the test acts.
+        const result = await (typeof handler === 'function' ? handler(url, options) : handler);
         const { status = 200, body = { success: true, data: [] } } = result || {};
         return { ok: status >= 200 && status < 300, status, json: async () => body };
     };

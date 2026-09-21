@@ -105,6 +105,8 @@ func (s *Server) registerHandlers() {
 
 	// Webhook management endpoints
 	http.HandleFunc("/api/webhooks", CorsMiddleware(s.handleWebhooks))
+	// A fixed path: the mux prefers it over the /api/webhooks/{id} prefix below.
+	http.HandleFunc("/api/webhooks/validate", CorsMiddleware(s.handleValidateWebhook))
 	http.HandleFunc("/api/webhooks/", CorsMiddleware(s.handleWebhookByID))
 	http.HandleFunc("/api/webhook-logs", CorsMiddleware(s.handleWebhookLogs))
 }

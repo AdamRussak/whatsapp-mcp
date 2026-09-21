@@ -56,6 +56,23 @@ type WebhookConfig struct {
 	// RetentionDays is how long this listener's captures are kept before retention removes
 	// the files. 0 — the default, and what an absent JSON field means — keeps them forever.
 	RetentionDays int `json:"retention_days"`
+	// TriggerMode is how the triggers combine: "or" fires when any enabled trigger matches,
+	// "and" when every one does (ADR 0001). Absent or empty means "or".
+	TriggerMode string `json:"trigger_mode"`
+}
+
+// Trigger modes. See WebhookConfig.TriggerMode.
+const (
+	TriggerModeOr  = "or"
+	TriggerModeAnd = "and"
+)
+
+// Mode returns the trigger mode, reading absent or empty as "or".
+func (c *WebhookConfig) Mode() string {
+	if c.TriggerMode == "" {
+		return TriggerModeOr
+	}
+	return c.TriggerMode
 }
 
 // VoiceOnly reports whether auto-download is restricted to voice notes, defaulting to true
@@ -76,12 +93,17 @@ type WebhookTrigger struct {
 
 // WebhookPayload represents the standardized payload structure for webhook notifications
 type WebhookPayload struct {
-	EventType     string             `json:"event_type"`
-	Timestamp     string             `json:"timestamp"`
-	WebhookConfig WebhookConfigInfo  `json:"webhook_config"`
-	Trigger       WebhookTriggerInfo `json:"trigger"`
-	Message       WebhookMessageInfo `json:"message"`
-	Metadata      WebhookMetadata    `json:"metadata"`
+	EventType     string            `json:"event_type"`
+	Timestamp     string            `json:"timestamp"`
+	WebhookConfig WebhookConfigInfo `json:"webhook_config"`
+	// Trigger is the first trigger that matched. Its shape is fixed: n8n workflows read it.
+	Trigger WebhookTriggerInfo `json:"trigger"`
+	// MatchedTriggers is every trigger that matched, in trigger order: one under "or", all
+	// enabled triggers under "and". TriggerMode is the listener's mode.
+	MatchedTriggers []WebhookTriggerInfo `json:"matched_triggers"`
+	TriggerMode     string               `json:"trigger_mode"`
+	Message         WebhookMessageInfo   `json:"message"`
+	Metadata        WebhookMetadata      `json:"metadata"`
 }
 
 type WebhookConfigInfo struct {

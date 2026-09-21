@@ -90,3 +90,23 @@ func ResolveChatJIDs(chat, storeDir string) ([]string, error) {
 	sort.Strings(jids)
 	return jids, nil
 }
+
+// LIDMapReadable reports whether ResolveChatJIDs can consult the phone/LID map in storeDir.
+// ResolveChatJIDs falls back to the identifier as typed when it cannot, silently; a caller
+// that rejects input on the strength of that answer needs to know which one it got.
+func LIDMapReadable(storeDir string) bool {
+	if storeDir == "" {
+		storeDir = "store"
+	}
+	path := filepath.Join(storeDir, "whatsapp.db")
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=ro&_busy_timeout=5000", path))
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	var n int
+	return db.QueryRow("SELECT COUNT(*) FROM whatsmeow_lid_map LIMIT 1").Scan(&n) == nil
+}

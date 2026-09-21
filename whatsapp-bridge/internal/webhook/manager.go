@@ -102,40 +102,73 @@ func (wm *Manager) GetWebhookConfigs() []*types.WebhookConfig {
 	return configs
 }
 
-// MatchesTriggers checks if a message matches any webhook triggers
+// configMatch is one listener that a message fired, with the triggers that made it fire.
+type configMatch struct {
+	config   *types.WebhookConfig
+	triggers []types.WebhookTrigger
+}
+
+// MatchesTriggers returns the enabled listeners the message fires.
 func (wm *Manager) MatchesTriggers(msg *events.Message, chatName string) []*types.WebhookConfig {
+	var configs []*types.WebhookConfig
+	for _, m := range wm.matchConfigs(msg, chatName) {
+		configs = append(configs, m.config)
+	}
+	return configs
+}
+
+// matchConfigs returns every enabled listener the message fires, each with its matched
+// triggers.
+func (wm *Manager) matchConfigs(msg *events.Message, chatName string) []configMatch {
 	wm.mutex.RLock()
 	defer wm.mutex.RUnlock()
 
-	var matchedConfigs []*types.WebhookConfig
-
-	// Extract message content
 	content := whatsapp.ExtractTextContent(msg.Message)
 	mediaType := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID).MediaType
 
+	var matches []configMatch
 	for _, config := range wm.configs {
 		if !config.Enabled {
 			continue
 		}
-
-		matched := false
-		for _, trigger := range config.Triggers {
-			if !trigger.Enabled {
-				continue
-			}
-
-			if wm.matchesTrigger(trigger, msg, content, mediaType, chatName) {
-				matched = true
-				break
-			}
-		}
-
-		if matched {
-			matchedConfigs = append(matchedConfigs, config)
+		if triggers := wm.matchingTriggers(config, msg, content, mediaType, chatName); len(triggers) > 0 {
+			matches = append(matches, configMatch{config: config, triggers: triggers})
 		}
 	}
+	return matches
+}
 
-	return matchedConfigs
+// matchingTriggers is the one place a listener's match decision is made (ADR 0001). It
+// returns the enabled triggers that made the listener fire, in trigger order, or nothing
+// when it does not fire:
+//
+//   - "or": the first enabled trigger that matches — one entry, as before match modes.
+//   - "and": every enabled trigger, and only when every one of them matches. "all" is
+//     always true, so it adds no requirement.
+//
+// Disabled triggers are skipped in both modes, so a listener with no enabled triggers
+// matches nothing. The payload's trigger and matched_triggers come from this same list, so
+// they can never name a trigger the decision did not use.
+func (wm *Manager) matchingTriggers(config *types.WebhookConfig, msg *events.Message, content, mediaType, chatName string) []types.WebhookTrigger {
+	and := config.Mode() == types.TriggerModeAnd
+
+	var matched []types.WebhookTrigger
+	for _, trigger := range config.Triggers {
+		if !trigger.Enabled {
+			continue
+		}
+		if !wm.matchesTrigger(trigger, msg, content, mediaType, chatName) {
+			if and {
+				return nil
+			}
+			continue
+		}
+		matched = append(matched, trigger)
+		if !and {
+			break
+		}
+	}
+	return matched
 }
 
 // matchesTrigger checks if a single trigger matches the message
@@ -199,12 +232,17 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 	startTime := time.Now()
 
 	// Find matching webhook configurations
-	matchedConfigs := wm.MatchesTriggers(msg, chatName)
-	if len(matchedConfigs) == 0 {
+	matches := wm.matchConfigs(msg, chatName)
+	if len(matches) == 0 {
 		return
 	}
 
-	wm.logger.Infof("Found %d matching webhook configs for message %s", len(matchedConfigs), msg.Info.ID)
+	wm.logger.Infof("Found %d matching webhook configs for message %s", len(matches), msg.Info.ID)
+
+	matchedConfigs := make([]*types.WebhookConfig, len(matches))
+	for i, m := range matches {
+		matchedConfigs[i] = m.config
+	}
 
 	// Extract message content and media info
 	content := whatsapp.ExtractTextContent(msg.Message)
@@ -268,26 +306,18 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 	}
 
 	// Send webhooks for each matched configuration
-	for _, config := range matchedConfigs {
+	for _, m := range matches {
+		config := m.config
 		// A listener with auto-download on and no URL captures the media and posts nowhere.
 		if config.WebhookURL == "" {
 			continue
 		}
 
-		// Find the specific trigger that matched
-		var matchedTrigger *types.WebhookTrigger
-		content := whatsapp.ExtractTextContent(msg.Message)
-		mediaType := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID).MediaType
-
-		for _, trigger := range config.Triggers {
-			if trigger.Enabled && wm.matchesTrigger(trigger, msg, content, mediaType, chatName) {
-				matchedTrigger = &trigger
-				break
-			}
-		}
-
-		if matchedTrigger == nil {
-			continue
+		// The first matched trigger is the one n8n reads; matched_triggers has them all.
+		matchedTrigger := m.triggers[0]
+		matchedInfo := make([]types.WebhookTriggerInfo, len(m.triggers))
+		for i, trigger := range m.triggers {
+			matchedInfo[i] = triggerInfo(trigger)
 		}
 
 		// Customize payload for this webhook
@@ -296,15 +326,21 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 			ID:   config.ID,
 			Name: config.Name,
 		}
-		payload.Trigger = types.WebhookTriggerInfo{
-			Type:      matchedTrigger.TriggerType,
-			Value:     matchedTrigger.TriggerValue,
-			MatchType: matchedTrigger.MatchType,
-		}
+		payload.Trigger = matchedInfo[0]
+		payload.MatchedTriggers = matchedInfo
+		payload.TriggerMode = config.Mode()
 		payload.Metadata.DeliveryAttempt = 1
 
 		// Send webhook asynchronously
-		go wm.delivery.DeliverWebhook(config, &payload, msg.Info.ID, msg.Info.Chat.String(), matchedTrigger)
+		go wm.delivery.DeliverWebhook(config, &payload, msg.Info.ID, msg.Info.Chat.String(), &matchedTrigger)
+	}
+}
+
+func triggerInfo(trigger types.WebhookTrigger) types.WebhookTriggerInfo {
+	return types.WebhookTriggerInfo{
+		Type:      trigger.TriggerType,
+		Value:     trigger.TriggerValue,
+		MatchType: trigger.MatchType,
 	}
 }
 
@@ -422,14 +458,12 @@ func (wm *Manager) matchesAlias(trigger types.WebhookTrigger, candidates ...stri
 
 // firstMatchingTrigger returns the trigger that made this config match, for attribution in
 // logs. It repeats the matching the caller already did, which is cheap and keeps the match
-// decision in exactly one place.
+// decision in exactly one place: matchingTriggers.
 func (wm *Manager) firstMatchingTrigger(config *types.WebhookConfig, msg *events.Message, chatName, mediaType string) *types.WebhookTrigger {
 	content := whatsapp.ExtractTextContent(msg.Message)
-	for i := range config.Triggers {
-		trigger := config.Triggers[i]
-		if trigger.Enabled && wm.matchesTrigger(trigger, msg, content, mediaType, chatName) {
-			return &config.Triggers[i]
-		}
+	triggers := wm.matchingTriggers(config, msg, content, mediaType, chatName)
+	if len(triggers) == 0 {
+		return nil
 	}
-	return nil
+	return &triggers[0]
 }

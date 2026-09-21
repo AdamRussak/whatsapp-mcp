@@ -416,6 +416,61 @@ header p {
     border-radius: var(--border-radius);
 }
 
+/* Match: OR / AND, above the trigger rows */
+.trigger-mode-field {
+    margin-bottom: 10px;
+}
+
+.trigger-mode-field label {
+    margin-bottom: 0;
+    font-weight: normal;
+}
+
+.trigger-mode-field select {
+    width: auto;
+}
+
+/* A validation problem with one trigger, on its own line under the row */
+.trigger-error {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    color: var(--error-color);
+}
+
+.trigger-item.has-error {
+    box-shadow: inset 3px 0 0 var(--error-color);
+}
+
+.trigger-item.trigger-disabled {
+    opacity: 0.55;
+}
+
+/* The plain-language sentence under the triggers */
+.trigger-summary {
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+/* Validation problems that are not about one trigger */
+.form-errors {
+    padding: 10px 12px;
+    border-left: 3px solid var(--error-color);
+    background-color: var(--background-color);
+    border-radius: var(--border-radius);
+    font-size: 13px;
+    color: var(--error-color);
+}
+
+.form-errors div + div {
+    margin-top: 4px;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .btn-remove-trigger {
     background-color: var(--error-color);
     color: white;
