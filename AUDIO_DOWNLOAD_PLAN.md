@@ -16,7 +16,9 @@ Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started 
 | G3 | Download past voice messages from one chat or group | Milestone 1 (batch job) → Phase 5 (by sender, history request) | ✅ batch job run over the target contact's full history (4,062 items, §2.9); only the last ~11–19 days are recoverable (B1) |
 | G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | ✅ live since 2026-09-21 (auto-download is an action on a webhook entry, §2.14) |
 
-Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → Phases 2/3 → Phase 4 → Phase 6.**
+Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ → backlog sweep ✅ → Phase 4 ✅ (brought forward, §2.12) → Phases 2/3 ← next → Phase 5 → Phase 6.**
+
+All three goals are met for media inside the CDN window. What remains is ergonomics (Phases 2/3: MCP tools, MP3 conversion, a Gradio tab), the low-payoff history request (Phase 5), transcription (Phase 6), and the operational gaps in §2.16.
 
 ---
 
@@ -93,7 +95,7 @@ Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → 
 5. ✅ **Fix B6, B8** (B4, B7 were done in step 4). See §2.7: one folder-key function, returned in the batch response; `after`/`before` normalised to the stored format.
 6. ✅ **Missing tests**: LID expansion, cache hit, retry waiter (fake `events.MediaRetry`), "no writes to `messages`". See §2.8.
 7. ✅ **Execute §5.5**: baseline (stop, back up, `integrity_check`, dump the chat's rows) → live run on `972523996302` with full history (rehearsal skipped per decision, unavailable audio marked failed without blocking on retry timeouts) → after-run diff. Verified: `diff` is empty, 106 `.ogg` files saved, `media.db` and `index.json` cover all 4,062 items, re-run skipped 4062/4062. Definition of done §5.6 100% met.
-8. ✅ **Phase 0** (§2.10) and ✅ **Phase 1** (§2.11) are done and deployed. Next step: §2.12.
+8. ✅ **Phase 0** (§2.10), ✅ **Phase 1** (§2.11), ✅ the **backlog sweep** (§2.13) and ✅ **Phase 4** (§2.14, §2.15) are done and deployed. Open items are collected in **§2.16**.
 
 ### 2.5 B1 investigation (2026-09-19, 14:58–15:03 UTC)
 
@@ -358,6 +360,38 @@ on disk was at v3. §4.6 step 7 already warns about this — follow it: use
 `up -d --build --force-recreate`, and confirm the deploy by the schema version in the log,
 never by the build output.
 
+### 2.16 Open items (as of 2026-09-21, after Phase 4)
+
+All three goals in §1 are met for media inside the CDN window. What is left, worst first:
+
+**Security / operational**
+
+| # | Item | Notes |
+|---|---|---|
+| O1 | **Re-pairing after S1 is still undecided** (§2.4 step 1) | The session DB was served on an open port for an unknown window. No access log exists, so there is no way to tell whether it was fetched. Your call. |
+| O2 | **Port 8080 is still public and unauthenticated** | `/api/download`, `/api/media/` and `/api/webhooks` all answer anyone who can reach the host. S1 is fixed, but the surface is unchanged: bind to localhost or the Docker network, or add token auth. |
+| O3 | **No retention policy for captured media** | Negligible at voice-note volume (281 files, ~30 MB). Becomes load-bearing the moment capture widens to images or video. |
+| O4 | **`me-number` webhook is live again** | It matched nothing for months (B11) and now fires on your own messages. If n8n acts on it, check that before it surprises you. |
+
+**Known bugs**
+
+| # | Item | Notes |
+|---|---|---|
+| B1 | Media retry returns re-keyed copies | No fix known; anything past ~11–19 days is unrecoverable. Recorded honestly as `rekeyed_on_phone`. |
+| B9 | Cosmetic leftovers | `MediaDownloader` in `media.go` is still unused; `gofmt` flags `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go`; the Python `download_media` error-key check is unconfirmed. |
+
+**Gaps in what shipped**
+
+| # | Item | Notes |
+|---|---|---|
+| G-a | **Auto-download captures audio only** | The gate is hard-limited to `media_type == "audio"`; images, video and documents are never queued even with a matching trigger. Deliberate (goal G2 is about voice), but it is the first thing a user asks for after seeing an image arrive. A contained change if wanted. |
+| G-b | **The exclusion path is unit-tested, not live-proven** | Every live message since deploy that reached a rule was audio, so "a non-matching message is correctly skipped" has never been demonstrated on real traffic. |
+| G-c | **No chat picker in the UI** | A rule still means typing a phone number or pasting a group JID. B11 made phone numbers work; it did not make them discoverable. Needs `GET /api/chats` plus a dropdown. |
+| G-d | **The UI has no lint or tests** | There is no JS toolchain in this environment; `script.js` changes are read-checked and then exercised by hand. |
+| G-e | **Rollback was verified by query, not by drill** | The pre-phase4 binary's exact `SELECT`/`INSERT` were run against a v3 copy and work. The old image was never actually booted against a migrated database (§4.6 step 9 remains partly owed). |
+
+**Later phases, unchanged in scope:** Phase 2 (MCP fallback download, `list_messages(media_type)`, MP3 conversion), Phase 3 (MCP tools and a Gradio tab), Phase 5 (batch by sender; the history request is explicitly low-payoff because of B1), Phase 6 (transcription). Plus the §5.2 parity fix: `batch_download_chat_audio` still exposes only `chat`, `limit`, `skip_cached`, `retry_failed`.
+
 ---
 
 ## 3. Background
@@ -389,7 +423,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 7. **Old rows can't tell voice notes from audio files** (no `ptt`). Milestone 1 downloads all audio; nearly all 1:1 audio is voice notes anyway.
 8. **Stored filenames collided** (second resolution). ✅ Fixed for audio in schema v1 (named from the message ID); image/video/document still use `time.Now()`. Downloaded files on disk are named by timestamp + direction + message ID; the `filename` column is never used or changed.
 9. **About half of each chat is `from_me`.** Their media retry goes to your own phone.
-10. **Webhook trigger model to reuse for G2:** `WebhookTrigger{TriggerType: chat_jid|sender|keyword|media_type|all, TriggerValue, MatchType: exact|contains|regex}`, matched by `Manager.matchesTrigger`.
+10. **Webhook trigger model, reused for G2 ✅:** `WebhookTrigger{TriggerType: chat_jid|sender|keyword|media_type|all, TriggerValue, MatchType: exact|contains|regex}`, matched by `Manager.matchesTrigger`. Auto-download is an action on this same model rather than a second rule engine (§6 Phase 4). Exact `sender`/`chat_jid` values are expanded through `whatsmeow_lid_map` at load, without which a phone number matches nothing (B11, §2.15).
 11. **whatsmeow:** ✅ now on `v0.0.0-20260917111002-2e338d0ee73d` with Go 1.26 (§2.10); was `v0.0.0-20260718134955-fac667d55293`. Relevant APIs: `DownloadMediaWithPath(ctx, directPath, encSHA256, sha256, mediaKey, mediaType, mmsType, allowNoHash)` (verifies the ciphertext hash when `encSHA256` is set — the cause of B1's error), `DownloadToFile`, `SendMediaRetryReceipt`, `DecryptMediaRetryNotification`, `BuildHistorySyncRequest`.
 
 ### 3.3 Inventory (read-only, 2026-09-19)
@@ -450,7 +484,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 ### 4.5 Tests and runtime
 - Unit tests use `t.TempDir()` only. Integration runs use a `store-test/` copy via `STORE_DIR` ✅ (with the live bridge stopped — the copy shares the session).
 - Media goes only under `store/media/` (and `store/downloads/` for MCP copies). `store/whatsapp_store.db` (0 bytes, leftover) is left alone.
-- ❌ `stop_grace_period: 30s` on the bridge in `docker-compose.yaml`; shutdown closes DBs after whatsmeow disconnects.
+- ✅ `stop_grace_period: 30s` on the bridge in `docker-compose.yaml` (shipped with Phase 4); shutdown drains the auto-download pool, then whatsmeow disconnects, then the DBs close.
 - Never download or retry synchronously inside the whatsmeow event handler.
 - Security: `/api/download`, `/api/media/`, batch return private audio. Keep the bridge off the public internet or add token auth before exposing it (port 8080 is currently published on `0.0.0.0`).
 
@@ -464,7 +498,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 | 4 | rehearse on `store-test` | `migration vN applied`, exit 0 |
 | 5 | on the copy: `PRAGMA quick_check` + step-3 queries | `ok`, identical |
 | 6 | spot-check 5 old rows before/after | byte-identical |
-| 7 | `docker compose up -d --build` (use `--force-recreate` if the container isn't replaced) | healthy, expected migration version |
+| 7 | `docker compose up -d --build --force-recreate` — **always `--force-recreate`**, never plain `--build`. This has now bitten twice (§2.10, §2.15): a stopped or unchanged container is *started*, not replaced, so the freshly built image never runs | healthy, **and the log prints the expected schema version** — that is the proof, not "Built" or "Up/healthy" |
 | 8 | steps 5–6 on live DB (read-only) | same |
 | 9 | once: rollback drill on the copy with the old image | old binary serves `/api/webhooks` |
 
@@ -671,9 +705,10 @@ Only needed for live `is_ptt` tagging and auto-download; history download does n
 
 ### Phase 4 — Auto-download rules (G2) ✅ (deployed 2026-09-21, §2.14)
 
-**Status:** live since 2026-09-21 11:35 UTC on `messages.db` schema **v2**. Suite at 60 tests
-(from 40), `go vet` clean, `-race` clean. First live capture 3 minutes after the first rule
-was created, in 475 ms, with no restart in between (§2.14).
+**Status:** live since 2026-09-21 11:35 UTC (schema **v2**), extended the same day by schema
+**v3** for visible captures and LID-aware triggers (§2.15). Suite at 63 tests (from 40),
+`go vet` clean, `-race` clean. First live capture came 3 minutes after the first rule was
+created, in 475 ms, with no restart in between (§2.14).
 
 | Piece | File |
 |---|---|
@@ -699,7 +734,7 @@ ALTER TABLE webhook_configs ADD COLUMN auto_download BOOLEAN DEFAULT 0;
 ALTER TABLE webhook_configs ADD COLUMN auto_download_voice_only BOOLEAN DEFAULT 1;
 ```
 
-The same two columns go into `createTables` for a fresh database; `createTables` runs before `runMigrations`, and `addColumns` skips what `PRAGMA table_info` already shows, so v2 is then a no-op. No `auto_download_rules`, no `auto_download_triggers`, no `auto_download_logs` — per-message outcomes already have an honest home in `media.db.media_downloads` (`ok` / `failed` / `rekeyed_on_phone` / …). Rule attribution lives in the bridge log only; that is the accepted cost of not building a second logs table.
+The same two columns go into `createTables` for a fresh database; `createTables` runs before `runMigrations`, and `addColumns` skips what `PRAGMA table_info` already shows, so v2 is then a no-op. No `auto_download_rules` and no `auto_download_triggers`. There is also no `auto_download_logs` table: per-message outcomes already have an honest home in `media.db.media_downloads` (`ok` / `failed` / `rekeyed_on_phone` / …), and schema **v3** (§2.15) puts the *listener-facing* record in `webhook_logs` alongside that listener's deliveries, so the UI's existing Logs button shows captures with no second table, endpoint or view.
 
 **What fires the download.** `webhook.Manager.ProcessMessage` already runs after `StoreMessage` (`handlers.go:219`) and already computes the matched configs. The trigger picks the *who*; the rule's own flags pick the *what*:
 
@@ -724,7 +759,7 @@ type Downloader interface {
 
 `Stop()` runs before `client.Disconnect()`, because the workers download over that same connection. It stops workers taking new jobs, then gives whatever is already downloading `ShutdownGrace` (15 s, deliberately under the 30 s `stop_grace_period`) to finish — a voice note in flight is usually seconds from being safe on disk — and only then cancels. Jobs still queued are dropped: those messages are in `messages.db` and can be fetched later, whereas a half-written file cannot be.
 
-**Config** (ops knobs only — never *who*): `AUTO_DOWNLOAD=on|off` (default `on`, a kill switch that does not touch any rule), `AUTO_DOWNLOAD_WORKERS=2`, `AUTO_DOWNLOAD_QUEUE_SIZE=100`, `AUTO_DOWNLOAD_TIMEOUT_S=60`. Plus the still-open `stop_grace_period: 30s` on the bridge (§4.5).
+**Config** (ops knobs only — never *who*): `AUTO_DOWNLOAD=on|off` (default `on`, a kill switch that does not touch any rule), `AUTO_DOWNLOAD_WORKERS=2`, `AUTO_DOWNLOAD_QUEUE_SIZE=100`, `AUTO_DOWNLOAD_TIMEOUT_S=60`. Plus `stop_grace_period: 30s` on the bridge, shipped with this phase (§4.5).
 
 **API:** no new endpoints. `POST`/`PUT /api/webhooks` carry `auto_download` and `auto_download_voice_only`. Two consequences to implement:
 - `ValidateWebhookConfig`: `webhook_url` is required **unless** `auto_download` is true. `TestWebhook` on a URL-less config → 400.
@@ -761,5 +796,5 @@ type Downloader interface {
 - **Expired media is the norm** for anything older than ~11–19 days, and media retry doesn't recover it today (B1). Report per item, never abort a batch.
 - **MCP SDK v2** — ✅ pinned `<2` (§2.10); mcp 2.2.0 is live on PyPI, so the bound is load-bearing.
 - **Rate limits** — one worker, 250 ms pace for history; ≤ 2 workers for auto-download.
-- **Disk** — ~120 KB per minute of voice; add retention before `AUTO_DOWNLOAD_VOICE=all`.
+- **Disk** — ~120 KB per minute of voice. 281 files / ~30 MB today at ~19 voice notes a day, so growth is negligible for now; add retention before widening capture to images and video, which are orders of magnitude larger. No retention exists yet (§2.16).
 - **View-once** audio — skip.
