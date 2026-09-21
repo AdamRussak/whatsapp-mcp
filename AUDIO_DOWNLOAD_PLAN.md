@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-21:** Milestone 1, **Phases 0 and 1 are complete and deployed**, and the **backlog sweep (§2.13) is complete** (164/164 recent uncaptured audio files recovered with 0 failures). Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Phase 4 (auto-download) is implemented and awaiting deploy** (§6): a listener is an ordinary webhook entry with `auto_download` ticked, defined in the same UI and the same `POST /api/webhooks` as every event today. Schema v2 rehearsed on a copy of the live DB; the §4.6 deploy checklist has not been run. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
+**Status as of 2026-09-21:** Milestone 1, **Phases 0 and 1 are complete and deployed**, and the **backlog sweep (§2.13) is complete** (164/164 recent uncaptured audio files recovered with 0 failures). Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Phase 4 (auto-download) deployed 2026-09-21 11:35 UTC** (§2.14, schema v2): a listener is an ordinary webhook entry with `auto_download` ticked, defined in the same UI and the same `POST /api/webhooks` as every event today. The leak is now closed at both ends — the backlog was swept (§2.13) and new voice notes are captured as they arrive. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -14,7 +14,7 @@ Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started 
 |---|---|---|---|
 | G1 | Download a single voice message (or any audio) on demand | Milestone 1 (`POST /api/download`) + Phase 3 MCP tool | 🟡 works for media up to ~11–19 days old; older is unrecoverable (B1) |
 | G3 | Download past voice messages from one chat or group | Milestone 1 (batch job) → Phase 5 (by sender, history request) | ✅ batch job run over the target contact's full history (4,062 items, §2.9); only the last ~11–19 days are recoverable (B1) |
-| G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | 🟡 implemented (auto-download is an action on a webhook entry), not yet deployed |
+| G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | ✅ live since 2026-09-21 (auto-download is an action on a webhook entry, §2.14) |
 
 Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → Phases 2/3 → Phase 4 → Phase 6.**
 
@@ -73,6 +73,7 @@ Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → 
 | B7 ✅ | med | *(fixed: removed; every message goes through `HandleMessage` again)* Placeholder-resend hack (out of scope): sends a `BuildUnavailableMessageRequest` peer message to the phone for **every** retried item, and `HandlePlaceholderMessage` swallows any matching `events.Message` so it is never stored or sent to webhooks (even when the channel is full). It has never fired (0 in logs). | `download.go`, `client.go`, `main.go` |
 | B8 ✅ | low | *(fixed: `NormalizeTimeFilter`; invalid → 400)* `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
 | B9 | low | `MediaDownloader` (`media.go`) is still unused — nothing constructs it. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` now flags only `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go` (`types.go` and `whatsapp/handlers.go` were formatted in Phase 1). Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
+| B11 | med | A `sender` / `chat_jid` trigger typed as a phone number matches nothing: 1:1 chats are LID-addressed now (§3.2 finding 6) and `matchesTrigger` compares raw strings, while `ResolveChatJIDs` is not on that path. Affects webhook delivery as well as auto-download. See §2.14. | `webhook/manager.go` |
 | B10 ✅ | low | *(fixed in Phase 1, §2.11)* `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
 ### 2.4 Next steps (in order)
@@ -295,6 +296,36 @@ Part A executed cleanly with zero code changes.
 - **Files on disk:** 279 audio files in `store/media/` across 36 chat folders (276 valid `OggS` Opus voice notes + 3 valid MPEG AAC audio forwarded in groups), each with updated `index.json`.
 - **Database safety:** `messages.db` and `whatsapp.db` byte/table integrity fully preserved (0 writes to `messages.db`).
 - **Next:** Part B — Phase 4 (auto-download) to capture incoming voice notes live as they arrive.
+
+### 2.14 Phase 4 deployed ✅ (2026-09-21, 11:32–11:39 UTC)
+
+Full §4.6 checklist, no step skipped.
+
+| Step | Result |
+|---|---|
+| Image tagged | `whatsapp-bridge:pre-phase4` (`7b1488c4f6e6`) |
+| `docker compose stop` | no `-journal`/`-wal`/`-shm` left in `store/` |
+| Backups + `integrity_check` | `messages_20260921_113202.db`, `whatsapp_…`, `media_…` — all three `ok` |
+| Rehearsal on a fresh copy | v2 applied in ~0.1 s; baseline diff **only** `schema_version` 1→2; 5 oldest audio rows byte-identical; `quick_check` `ok` |
+| `docker compose up -d --build` | healthy in 19 s, **no QR re-pair**; log reads `messages.db schema version 2` and `Auto-download started with 2 worker(s), queue size 100` |
+| Live DB after | baseline diff **only** `schema_version` 1→2; all 6 webhook rows byte-identical; `quick_check` `ok`; every existing config reads `auto_download = 0`, `auto_download_voice_only = 1` |
+| Rollback drill (step 9) | the pre-phase4 binary's exact `SELECT`/`INSERT` on `webhook_configs` both work against v2, and its inserts take the column defaults |
+
+**Live verification.** One listener created through `POST /api/webhooks` at 11:36:32 — *"Capture voice notes"* (id 10): no URL (download-only), `auto_download` on, voice-notes-only, trigger `media_type = audio`. The bridge logged it **without a restart**, which is the whole point of putting rules in the database.
+
+At 11:38:51 a real voice note arrived in `62156783493249@lid` and was captured in **475 ms**:
+
+```
+Auto-downloaded 3A1F647EBD8CE7F8018E in 62156783493249@lid to
+media/972547669192/2026-09-21_113850_them_3A1F647EBD8CE7F8018E.ogg
+in 475ms (rule 10 "Capture voice notes", worker 1)
+```
+
+8,840 bytes, valid `OggS` header, `ok` in `media.db`, and the `messages` row carries `is_ptt = 1`, `seconds = 3`, `mimetype = audio/ogg; codecs=opus`. **Zero media retry receipts** were sent (`SkipMediaRetry`, as designed). The exclusion half of the check is covered by unit tests only: no non-audio message happened to arrive in the observation window, and the deployed rule is account-wide by design.
+
+> [!IMPORTANT]
+> **B11 (new, med): a `sender` or `chat_jid` trigger typed as a phone number silently matches nothing.**
+> Every recent 1:1 audio message lives in a `@lid` chat with a LID sender (`62156783493249@lid`, sender `62156783493249`; own messages `14018823594220`) — no phone numbers anywhere, per §3.2 finding 6. `Manager.matchesTrigger` compares raw strings, while `ResolveChatJIDs` — which already expands phone ↔ LID for downloads — is not on that path. So a rule added as `972523996302` looks correct and captures nothing. This affects existing **webhook delivery** too, not just auto-download. Fix: expand `sender`/`chat_jid` trigger values through `whatsmeow_lid_map` when configs are loaded. Workaround until then: use a `media_type` trigger, or paste the `@lid` JID.
 
 ---
 
@@ -607,17 +638,11 @@ Only needed for live `is_ptt` tagging and auto-download; history download does n
 - ❌ `download_voice_message(message_id, chat_jid, convert_to_mp3)`; `download_chat_audio(chat_jid, sender_phone_number, voice_only, limit, convert_to_mp3, after, before)`.
 - ❌ Gradio tab: chat dropdown, sender filter, "voice only", "MP3", results table with player.
 
-### Phase 4 — Auto-download rules (G2) 🟡 implemented, not yet deployed
+### Phase 4 — Auto-download rules (G2) ✅ (deployed 2026-09-21, §2.14)
 
-**Implementation status (2026-09-21):** code complete on branch `webhook`, suite at 60 tests
-(from 40), `go vet` clean, `-race` clean. **Not deployed** — the §4.6 checklist has not been
-run against the live databases yet. Migration v2 was rehearsed on a `.backup` copy of the
-live `messages.db` (476,892 messages, 6 webhook configs): applied in ~0.1 s, the 6 webhook
-rows came back **byte-identical**, `quick_check` = `ok`, message count and min/max timestamp
-unchanged, and every existing config reads `auto_download = 0`, `auto_download_voice_only = 1`
-— nothing starts capturing on its own. Rollback is safe by inspection, not yet drilled: the
-old binary's `CREATE TABLE IF NOT EXISTS` is a no-op on the widened table and every one of
-its webhook queries lists columns explicitly, so it neither sees nor needs the new ones.
+**Status:** live since 2026-09-21 11:35 UTC on `messages.db` schema **v2**. Suite at 60 tests
+(from 40), `go vet` clean, `-race` clean. First live capture 3 minutes after the first rule
+was created, in 475 ms, with no restart in between (§2.14).
 
 | Piece | File |
 |---|---|
