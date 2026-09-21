@@ -13,12 +13,20 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
-// GetChatName determines the appropriate name for a chat based on JID and other info
+// GetChatName determines the appropriate name for a chat based on JID and other info.
+//
+// sender is no longer used to name a 1:1 chat (B12): in a 1:1 chat the other party is the
+// chat itself, and when the first stored message was your own, the sender is you. The
+// parameter is kept so callers need not change.
 func (c *Client) GetChatName(messageStore *database.MessageStore, jid waTypes.JID, chatJID string, conversation interface{}, sender string) string {
-	// First, check if chat already exists in database with a name
+	// Reuse a stored name — unless it is a placeholder. Previously any stored name was kept
+	// forever, so a chat misnamed once stayed misnamed. A placeholder (empty, or only
+	// digits: a number, a LID, or your own LID) is resolved again, and HandleMessage's
+	// StoreChat then writes the real name back: each broken chat heals on its next message,
+	// through the normal one-row write, with no bulk update (§4.3).
 	var existingName string
 	err := messageStore.GetDB().QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
+	if err == nil && !NeedsName(existingName) {
 		// Chat exists with a name, use that
 		c.logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName
@@ -77,19 +85,7 @@ func (c *Client) GetChatName(messageStore *database.MessageStore, jid waTypes.JI
 	} else {
 		// This is an individual contact
 		c.logger.Infof("Getting name for contact: %s", chatJID)
-
-		// Just use contact info (full name)
-		contact, err := c.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
-			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
-			name = sender
-		} else {
-			// Last fallback to JID
-			name = jid.User
-		}
-
+		name = c.personChatName(context.Background(), jid)
 		c.logger.Infof("Using contact name: %s", name)
 	}
 
@@ -372,4 +368,52 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+}
+
+// personChatName names a 1:1 chat from what WhatsApp knows about the other party.
+//
+// It looks under BOTH of their JIDs, because they hold different things: your saved name is
+// on the phone JID, while a LID usually carries only their push name. Reading only the
+// chat's own JID — a LID, since 1:1 chats moved to LID addressing — finds no saved name,
+// which is how B12 happened. PickChatName makes the final choice, the same function the
+// read-time display path uses.
+func (c *Client) personChatName(ctx context.Context, jid waTypes.JID) string {
+	var phoneJID, lidJID waTypes.JID
+	if jid.Server == waTypes.HiddenUserServer {
+		lidJID = jid
+		if c.Store.LIDs != nil {
+			if pn, err := c.Store.LIDs.GetPNForLID(ctx, jid); err == nil {
+				phoneJID = pn
+			}
+		}
+	} else {
+		phoneJID = jid
+		if c.Store.LIDs != nil {
+			if lid, err := c.Store.LIDs.GetLIDForPN(ctx, jid); err == nil {
+				lidJID = lid
+			}
+		}
+	}
+
+	lookup := func(j waTypes.JID) ContactNames {
+		if j.IsEmpty() || c.Store.Contacts == nil {
+			return ContactNames{}
+		}
+		info, err := c.Store.Contacts.GetContact(ctx, j)
+		if err != nil || !info.Found {
+			return ContactNames{}
+		}
+		return ContactNames{
+			FirstName:    info.FirstName,
+			FullName:     info.FullName,
+			PushName:     info.PushName,
+			BusinessName: info.BusinessName,
+		}
+	}
+
+	number := ""
+	if !phoneJID.IsEmpty() {
+		number = phoneJID.User
+	}
+	return PickChatName(lookup(phoneJID), lookup(lidJID), number, jid.User)
 }

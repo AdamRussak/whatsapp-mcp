@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -327,6 +328,9 @@ type ChatSummary struct {
 	Name            string `json:"name"`
 	LastMessageTime string `json:"last_message_time"`
 	IsGroup         bool   `json:"is_group"`
+	// Phone is the other party's number for a 1:1 chat, when WhatsApp's LID map knows it.
+	// Filled at read time by the API, not stored.
+	Phone string `json:"phone,omitempty"`
 }
 
 // Chat kinds accepted by ListChats.
@@ -532,4 +536,49 @@ func ParseTimeFilter(s string) (t time.Time, ok bool, err error) {
 		}
 	}
 	return time.Time{}, false, fmt.Errorf("unrecognized time %q (use RFC 3339, \"YYYY-MM-DD HH:MM:SS\" or YYYY-MM-DD)", s)
+}
+
+// GetChatsByJIDs returns the chats among jids that exist, newest conversation first. The
+// picker uses it for people found by name or number in WhatsApp's contact store, whose
+// chats a text search over chats.jid and chats.name cannot reach.
+func (store *MessageStore) GetChatsByJIDs(jids []string) ([]ChatSummary, error) {
+	var chats []ChatSummary
+	for start := 0; start < len(jids); start += metadataBatch {
+		end := start + metadataBatch
+		if end > len(jids) {
+			end = len(jids)
+		}
+		batch := jids[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for i, jid := range batch {
+			placeholders[i] = "?"
+			args[i] = jid
+		}
+
+		rows, err := store.db.Query(`SELECT jid, name, last_message_time FROM chats WHERE jid IN (`+
+			strings.Join(placeholders, ",")+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var chat ChatSummary
+			var name, lastMessageTime sql.NullString
+			if err := rows.Scan(&chat.JID, &name, &lastMessageTime); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			chat.Name = name.String
+			chat.LastMessageTime = lastMessageTime.String
+			chat.IsGroup = strings.HasSuffix(chat.JID, "@g.us")
+			chats = append(chats, chat)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.SliceStable(chats, func(i, j int) bool { return chats[i].LastMessageTime > chats[j].LastMessageTime })
+	return chats, nil
 }

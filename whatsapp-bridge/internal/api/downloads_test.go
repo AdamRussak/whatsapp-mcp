@@ -310,3 +310,20 @@ func TestServeMediaDownloadFlag(t *testing.T) {
 		t.Fatalf("Content-Disposition = %q", cd)
 	}
 }
+
+// With the contact store present, a download from a chat stored under the user's own LID
+// shows the contact's real name. (The other download tests run without a contacts table,
+// which is what proves names fall back instead of failing the listing.)
+func TestDownloadsShowRealChatName(t *testing.T) {
+	server := downloadsServer(t)
+	writeContactStore(t, server.storeDir)
+	if err := server.messageStore.StoreChat(lidChat, "14018823594220",
+		time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, body := listDownloads(t, server, "?limit=1")
+	if body.Data[0].ChatName != "אילן וולפסון" {
+		t.Fatalf("chat_name = %q, want the contact's saved name", body.Data[0].ChatName)
+	}
+}

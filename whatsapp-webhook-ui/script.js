@@ -451,12 +451,14 @@ class WebhookManager {
         datalist.innerHTML = '';
         chats.forEach(chat => {
             const option = document.createElement('option');
-            // The value is what lands in the trigger; the label is what the user reads.
+            // The value is what lands in the trigger; the label is what the user reads. The
+            // bridge resolves real names and numbers, so a LID-only chat reads as
+            // "DUDI COHEN · 972527872233" rather than as its opaque ID.
             option.value = chat.jid;
             const name = chat.name && chat.name !== chat.jid.split('@')[0] ? chat.name : '';
-            option.textContent = name
-                ? `${name}${chat.is_group ? ' (group)' : ''}`
-                : (chat.is_group ? 'Group' : 'Contact');
+            const parts = [name || (chat.is_group ? 'Group' : 'Contact')];
+            if (chat.phone && chat.phone !== name) parts.push(chat.phone);
+            option.textContent = parts.join(' · ') + (chat.is_group ? ' (group)' : '');
             datalist.appendChild(option);
         });
     }

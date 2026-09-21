@@ -76,7 +76,7 @@ All three goals are met for media inside the CDN window. What remains is ergonom
 | B8 ✅ | low | *(fixed: `NormalizeTimeFilter`; invalid → 400)* `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
 | B9 | low | `MediaDownloader` (`media.go`) is still unused — nothing constructs it. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` now flags only `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go` (`types.go` and `whatsapp/handlers.go` were formatted in Phase 1). Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
 | B11 ✅ | med | *(fixed: `buildTriggerAliases` expands exact `sender`/`chat_jid` values through `whatsmeow_lid_map` at load)* A trigger typed as a phone number matched nothing: 1:1 chats are LID-addressed now (§3.2 finding 6) and `matchesTrigger` compares raw strings. It also silently broke the existing `me-number` webhook, which came back to life on deploy. See §2.15. | `webhook/manager.go` |
-| B12 | **med** | **100 chats are named after the user.** `GetChatName` falls back to the message's `sender` when the contact lookup fails; if the first message stored in a 1:1 chat is your own, the chat is named after *you*. `62156783493249@lid` (the contact `972547669192`, correctly named on its phone-JID chat) reads `14018823594220` — the user's own LID. 100 chats carry the user's own LID or number as their name (52 with audio), so the chat picker and the Downloads view show them as indistinguishable. 659 `@lid` chats are named after some bare number. Pre-existing; surfaced by Phase 7. Fix: never name a 1:1 chat after a from-me sender, prefer the paired phone chat's name via `whatsmeow_lid_map`, then a one-off repair of `chats.name` (regenerable per §4.3). | `whatsapp/handlers.go:85` |
+| B12 ✅ | **med** | *(fixed 2026-09-21, §2.17)* **100 chats were named after the user.** `GetChatName` falls back to the message's `sender` when the contact lookup fails; if the first message stored in a 1:1 chat is your own, the chat is named after *you*. `62156783493249@lid` (the contact `972547669192`, correctly named on its phone-JID chat) reads `14018823594220` — the user's own LID. 100 chats carry the user's own LID or number as their name (52 with audio), so the chat picker and the Downloads view show them as indistinguishable. 659 `@lid` chats are named after some bare number. Pre-existing; surfaced by Phase 7. Fix: never name a 1:1 chat after a from-me sender, prefer the paired phone chat's name via `whatsmeow_lid_map`, then a one-off repair of `chats.name` (regenerable per §4.3). | `whatsapp/handlers.go:85` |
 | B10 ✅ | low | *(fixed in Phase 1, §2.11)* `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
 ### 2.4 Next steps (in order)
@@ -379,7 +379,6 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 | # | Item | Notes |
 |---|---|---|
 | B1 | Media retry returns re-keyed copies | No fix known; anything past ~11–19 days is unrecoverable. Recorded honestly as `rekeyed_on_phone`. |
-| B12 | 100 chats named after the user | Makes the chat picker and the Downloads view show 100 different conversations under one identical name. Recommended next, before 7.4 — see §2.3. |
 | B9 | Cosmetic leftovers | `MediaDownloader` in `media.go` is still unused; `gofmt` flags `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go`; the Python `download_media` error-key check is unconfirmed. |
 
 **Gaps in what shipped**
@@ -393,6 +392,56 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 | G-e | **Rollback was verified by query, not by drill** | The pre-phase4 binary's exact `SELECT`/`INSERT` were run against a v3 copy and work. The old image was never actually booted against a migrated database (§4.6 step 9 remains partly owed). |
 
 **Later phases, unchanged in scope:** Phase 2 (MCP fallback download, `list_messages(media_type)`, MP3 conversion), Phase 3 (MCP tools and a Gradio tab), Phase 5 (batch by sender; the history request is explicitly low-payoff because of B1), Phase 6 (transcription). Plus the §5.2 parity fix: `batch_download_chat_audio` still exposes only `chat`, `limit`, `skip_cached`, `retry_failed`.
+
+### 2.17 Chat identity: B12 and the picker gap ✅ (2026-09-21)
+
+**What was wrong.** Two faces of one problem, both surfaced by Phase 7:
+- *Names.* `GetChatName` read only `full_name` under the chat's own JID. Since 1:1 chats
+  moved to LID addressing, that JID is a LID, and **the name you saved lives on the phone
+  JID** — 688 full names there against 7 on LIDs; LIDs carry push names (2,862). Finding
+  nothing, it fell back to the message's sender, which is *you* whenever the first stored
+  message was yours. 100 chats carried the user's own LID as their name. And because any
+  stored name was reused forever, a chat misnamed once stayed misnamed.
+- *Search.* The picker searched `chats.jid` and `chats.name`. A LID-only chat contains the
+  person's number in neither, so `972527872233` found nothing, though its chat
+  `244332250583270@lid` holds 780 messages.
+
+**Fix.**
+- `PickChatName` is the single decision, used by both the live writer and read-time
+  display: your saved name → a business's verified name → their push name → **their phone
+  number** → the opaque ID. Never anything derived from a sender.
+- `GetChatName` looks up the person under **both** JIDs through whatsmeow's LID store, and
+  treats a placeholder stored name (empty, or only digits) as no name. A misnamed chat
+  therefore heals on its next message, through the normal one-row `StoreChat` write — no
+  bulk update, per §4.3.
+- `ContactDirectory` does the same at read time for `/api/chats` and `/api/downloads`:
+  one read-only open of `whatsapp.db` per request, batched lookups. **Display only** — the
+  API never writes `chats`; a test asserts the stored row is untouched.
+- `SearchPeople` searches WhatsApp's contact store by saved, push or business name and by
+  number (five digits minimum), and maps every hit to both of the person's JIDs. The picker
+  merges those chats with its text search and shows `DUDI COHEN · 972527872233`.
+- **Names are best-effort.** `whatsapp.db` is whatsmeow's, and its schema can change under
+  an upgrade (§4.4). If it cannot be read, both endpoints answer with stored names rather
+  than failing; tests cover a contact store with no tables at all. My first version made
+  names a hard dependency and every downloads test caught it with a 500.
+
+**Live result**, over the 200 most recent 1:1 chats: 0 named after the user (was the
+most visible failure), 97 real names, and of the 103 people with no name anywhere, 95 now
+show their phone number and 8 an opaque LID (nothing maps them to a number). `972527872233`
+and `dudi` both find `244332250583270@lid` as DUDI COHEN; Ilan's chat reads
+"אילן וולפסון- וועד בית האלונים 16".
+
+**Deployed** with a stop, a `messages.db` backup (`integrity_check` ok) and image tag
+`whatsapp-bridge:pre-b12`. Every chat's stored name was snapshotted first (3,936 rows); a
+watch compares against it and fails if any *real* name is ever overwritten. The writer's
+healing is proven by test (`TestGetChatNameB12`, against an in-memory whatsmeow store) but
+had not yet met live traffic at the time of writing.
+
+**An upstream trap, now documented in the test.** whatsmeow's `ContactStore` interface
+names `PutContactName`'s parameters `(fullName, firstName)`; its SQL implementation is
+`(firstName, fullName)`. Go binds by position, so following the interface's labels stores
+the two swapped. The first run of the new test did exactly that. Live data is unaffected —
+whatsmeow calls its own implementation correctly.
 
 ---
 

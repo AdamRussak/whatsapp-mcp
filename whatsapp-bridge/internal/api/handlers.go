@@ -743,16 +743,100 @@ func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
 		limit = maxChatLimit
 	}
 
-	chats, err := s.messageStore.ListChats(strings.TrimSpace(r.URL.Query().Get("q")), kind, limit)
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	chats, err := s.messageStore.ListChats(query, kind, limit)
 	if err != nil {
 		SendJSONError(w, fmt.Sprintf("Failed to list chats: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	directory := s.openContactDirectory()
+	defer directory.Close()
+
+	// A text search over chats.jid and chats.name cannot find a LID-only chat by the
+	// person's name or number: its ID is the LID, and its stored name was often a
+	// placeholder (B12). WhatsApp's contact store knows both, so search it too. Groups have
+	// no contact entry, so a group-only search skips this. Best effort: without the contact
+	// store the text search still answers.
+	if query != "" && kind != database.ChatKindGroup {
+		people, err := directory.SearchPeople(query, maxChatLimit)
+		if err != nil {
+			fmt.Printf("Chat picker: contact search unavailable, using text search only: %v\n", err)
+		} else if len(people) > 0 {
+			extra, err := s.messageStore.GetChatsByJIDs(people)
+			if err != nil {
+				SendJSONError(w, fmt.Sprintf("Failed to list chats: %v", err), http.StatusInternalServerError)
+				return
+			}
+			chats = mergeChats(chats, extra, limit)
+		}
+	}
+
+	stored := make(map[string]string, len(chats))
+	for _, chat := range chats {
+		stored[chat.JID] = chat.Name
+	}
+	identities := resolveIdentities(directory, stored)
+	for i := range chats {
+		chats[i].Name = identities[chats[i].JID].Name
+		chats[i].Phone = identities[chats[i].JID].Phone
 	}
 
 	SendJSON(w, map[string]interface{}{
 		"success": true,
 		"data":    chats,
 	})
+}
+
+// mergeChats unions two chat lists, drops duplicates, keeps the newest conversation first
+// and trims to limit.
+func mergeChats(a, b []database.ChatSummary, limit int) []database.ChatSummary {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]database.ChatSummary, 0, len(a)+len(b))
+	for _, list := range [][]database.ChatSummary{a, b} {
+		for _, chat := range list {
+			if seen[chat.JID] {
+				continue
+			}
+			seen[chat.JID] = true
+			out = append(out, chat)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LastMessageTime > out[j].LastMessageTime })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// openContactDirectory opens WhatsApp's contact store for one request. It never fails the
+// request: without the store, a directory that knows nothing is returned and callers fall
+// back to stored names.
+func (s *Server) openContactDirectory() *whatsapp.ContactDirectory {
+	directory, err := whatsapp.OpenContactDirectory(s.storeDir)
+	if err != nil {
+		fmt.Printf("Contact store unavailable, showing stored chat names: %v\n", err)
+		return &whatsapp.ContactDirectory{}
+	}
+	return directory
+}
+
+// resolveIdentities returns display names and numbers for chats, best effort.
+//
+// Names are cosmetic, so they must never take a listing down with them. whatsapp.db is
+// whatsmeow's database and its schema can change under an upgrade (§4.4); if it cannot be
+// read, the stored names come back unchanged and the request still succeeds. Stored names
+// are never rewritten here: this is display only (§4.3).
+func resolveIdentities(directory *whatsapp.ContactDirectory, stored map[string]string) map[string]whatsapp.ChatIdentity {
+	identities, err := directory.Identify(stored)
+	if err != nil {
+		fmt.Printf("Chat names unavailable, showing stored names: %v\n", err)
+		identities = make(map[string]whatsapp.ChatIdentity, len(stored))
+		for jid, name := range stored {
+			identities[jid] = whatsapp.ChatIdentity{Name: name}
+		}
+	}
+	return identities
 }
 
 // handleHealth reports what the RUNNING bridge is, not what was built (GET /api/health).
@@ -958,10 +1042,22 @@ func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
 	for jid := range chatSet {
 		chatList = append(chatList, jid)
 	}
-	names, err := s.messageStore.GetChatNames(chatList)
+	storedNames, err := s.messageStore.GetChatNames(chatList)
 	if err != nil {
 		SendJSONError(w, fmt.Sprintf("Failed to read chat names: %v", err), http.StatusInternalServerError)
 		return
+	}
+	for _, jid := range chatList {
+		if _, ok := storedNames[jid]; !ok {
+			storedNames[jid] = ""
+		}
+	}
+	directory := s.openContactDirectory()
+	defer directory.Close()
+	identities := resolveIdentities(directory, storedNames)
+	names := make(map[string]string, len(identities))
+	for jid, identity := range identities {
+		names[jid] = identity.Name
 	}
 
 	items := make([]downloadItem, 0, len(page))
