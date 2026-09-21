@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-20:** Milestone 1 and **Phase 0 are complete and deployed.** Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 20:26 UTC (§2.10). Next is **Phase 1 + Phase 5**. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
+**Status as of 2026-09-20:** Milestone 1 and **Phase 0 are complete and deployed.** Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, and B10 is fixed. Next is **Phase 5** (batch by sender) or **Phase 2/3** (MCP tools). One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -16,7 +16,7 @@ Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started 
 | G3 | Download past voice messages from one chat or group | Milestone 1 (batch job) → Phase 5 (by sender, history request) | ✅ batch job run over the target contact's full history (4,062 items, §2.9); only the last ~11–19 days are recoverable (B1) |
 | G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | ❌ |
 
-Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 + Phase 5 ← next → Phases 2/3 → Phase 4 → Phase 6.**
+Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → Phases 2/3 → Phase 4 → Phase 6.**
 
 ---
 
@@ -71,7 +71,7 @@ Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 + Phase 5 ← next → Phas
 | B7 ✅ | med | *(fixed: removed; every message goes through `HandleMessage` again)* Placeholder-resend hack (out of scope): sends a `BuildUnavailableMessageRequest` peer message to the phone for **every** retried item, and `HandlePlaceholderMessage` swallows any matching `events.Message` so it is never stored or sent to webhooks (even when the channel is full). It has never fired (0 in logs). | `download.go`, `client.go`, `main.go` |
 | B8 ✅ | low | *(fixed: `NormalizeTimeFilter`; invalid → 400)* `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
 | B9 | low | `MediaDownloader` is unused. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` flags only pre-existing files (`types.go`, `whatsapp/handlers.go`, two tests); new/changed files are formatted. Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
-| B10 | low | `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
+| B10 ✅ | low | *(fixed in Phase 1, §2.11)* `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
 ### 2.4 Next steps (in order)
 
@@ -206,6 +206,31 @@ Checklist §4.6, run in order:
 | MCP container | rebuilt from the pinned `requirements.txt`: `mcp 1.30.0` (not 2.x), `gradio 5.34.2`, `starlette 0.52.1`, `uvicorn 0.53.0`, `requests 2.34.2`. The pin is now proven by a real build, not just a dry run. |
 
 **Rollback if needed:** `docker compose stop`, restore `store/backups/*_20260920_202211.db`, run `whatsapp-bridge:pre-phase0`. As measured in §6, the old binary also opens the migrated `(15, 8)` DB, so restoring the backup is optional.
+
+### 2.11 Phase 1 deployed (2026-09-21, 07:34–07:38 UTC)
+
+Schema v1 is live. Checklist §4.6:
+
+| Step | Result |
+|---|---|
+| Rehearsal (step 4) | Ran `cmd/migrate` against a consistent `.backup` copy of the live `messages.db` **with no downtime** — the migration touches only `messages.db`, so the bridge kept running. All **476,670** rows byte-identical (918,820-line dump, `diff` empty), `quick_check` `ok`, the four columns added, 0 rows non-NULL. |
+| Rollback rehearsal | Against the migrated copy, the old binary's own statements still work: its `GetMessages` and `GetMediaInfo` column lists, and its 13-column `INSERT OR REPLACE` (the new columns simply take NULL). No `SELECT *` anywhere, so extra columns are invisible to it. |
+| Baseline | `messages` 476,716 · `chats` 3,936 · `webhook_configs` 7 · `contact_nicknames` 0 · 8 tables |
+| Stop + backups | clean stop, no journal left; `store/backups/{messages,whatsapp,media}_20260921_073405.db`, all `integrity_check` `ok` |
+| Rollback tag | `whatsapp-bridge:pre-phase1` = `cdc6bf21f2b9` |
+| Deploy | `docker compose up -d --build --force-recreate` (never plain `--build`, see §2.10); running image `289451439f10`, distinct from the tag |
+| Migration | log line `messages.db schema version 1`; `schema_migrations` has `1 | 2026-09-21 07:36:23`; columns 13–16 are `direct_path`, `mimetype`, `seconds`, `is_ptt` |
+| `messages.db` | `quick_check` `ok`; all four baseline counts identical; full row dump **byte-identical** (0 lines changed, 0 added) |
+| API | `POST /api/download` on a cached item → 200. `media_type: "voice"` → job with `total: 0` (correct: only messages received from now on carry `is_ptt`). `media_type: "audio"` → normal. `media_type: "bogus"` → **400** with a clear message. |
+| B10 fixed | `download_url` is now `http://whatsapp-mcp-whatsapp-bridge-1:8080/api/media/...`, and the MCP container fetched it: **200, 3,968 bytes, `OggS`**. Previously it read `localhost:8080`, which only resolved inside the bridge container. |
+
+> [!NOTE]
+> **Outstanding live check:** no message arrived in the first minutes after the deploy (quiet early morning), so a newly received voice note has not yet been observed landing with `is_ptt = 1`. The store path itself logged zero failures. Confirm with:
+> ```bash
+> sudo sqlite3 "file:store/messages.db?mode=ro" \
+>   "SELECT id, filename, mimetype, seconds, is_ptt FROM messages WHERE is_ptt IS NOT NULL ORDER BY timestamp DESC LIMIT 5;"
+> ```
+> Expect `is_ptt = 1` and a `voice_<msgID>.ogg` filename for a voice note, `0` and `audio_<msgID>.ogg` for an attached audio file.
 
 ---
 
