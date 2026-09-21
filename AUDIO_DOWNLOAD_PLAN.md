@@ -234,8 +234,11 @@ Schema v1 is live. Checklist §4.6:
 
 Filenames are `voice_<msgID>.ogg`, mimetype `audio/ogg; codecs=opus`, and no row was tagged `is_ptt = 0` (no audio file attachments arrived). The whole chain then worked end to end: a batch with `media_type: "voice"` on that chat found exactly those 3, downloaded **3/3 directly with no media retry**, and wrote three valid `OggS` files to `store/media/972547669192/`. `media.db` `ok` 111 → 114.
 
-> [!TIP]
-> **Follow-up this enables.** `direct_path` is now stored for new audio, but `DownloadMedia` still re-derives it from `url` with `ExtractDirectPathFromURL` — the function that was silently wrong until S2. New rows could use the stored column directly and fall back to derivation only for older rows. Small, and it removes a parsing step from the download path.
+**Follow-up done (2026-09-21, 10:40 UTC).** `resolveDirectPath` now prefers the stored `direct_path` and falls back to `ExtractDirectPathFromURL` only for pre-v1 rows, removing a parsing step — and a repeat of S2 — from the download path for new media.
+
+Checked before trusting it: the protobuf's `direct_path` **does** carry the `ccb`/`oh`/`oe`/`_nc_sid` query string, so it is character-for-character what the fixed parser produces. Had it been the bare path, this "cleanup" would have dropped the CDN auth token and broken every new download. `TestStoredDirectPathMatchesDerived` pins that equivalence on a real url/direct_path pair, so a future divergence fails the suite instead of failing silently.
+
+Verified live: one downloaded voice note was moved aside and re-fetched through `POST /api/download` → `cached: false` (a real download, not the cache), 9,360 bytes, **SHA-256 identical** to the original, valid `OggS`, and **0 media retries**. `GetMediaInfo` selects the new column; `MediaInfo.DirectPath` carries it. Suite is 40 tests.
 
 ---
 
