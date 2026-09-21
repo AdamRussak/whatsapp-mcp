@@ -13,6 +13,7 @@ class WebhookManager {
         this.webhooks = [];
         this.currentEditingId = null;
         this.currentLogsWebhookId = null;
+        this.chatPickerSeq = 0;
         this.init();
     }
 
@@ -348,6 +349,15 @@ class WebhookManager {
                 valueInput.disabled = false;
                 valueInput.placeholder = 'Select or type media type (e.g., poll, image)';
                 valueInput.setAttribute('list', 'mediaTypeOptions');
+            } else if (typeSelect.value === 'chat_jid' || typeSelect.value === 'sender') {
+                valueInput.disabled = false;
+                // A sender trigger matches a person, so only 1:1 chats are offered; a group
+                // participant still has to be typed as a number.
+                const kind = typeSelect.value === 'sender' ? 'contact' : 'all';
+                valueInput.placeholder = kind === 'contact'
+                    ? 'Search a contact, or type a phone number'
+                    : 'Search a chat or group, or type a JID';
+                this.attachChatPicker(triggerRow, valueInput, kind);
             } else {
                 valueInput.disabled = false;
                 valueInput.placeholder = 'Trigger value';
@@ -357,6 +367,72 @@ class WebhookManager {
         
         // Trigger the change event to set initial state
         typeSelect.dispatchEvent(new Event('change'));
+    }
+
+    // attachChatPicker backs one trigger row's value field with a live list of chats.
+    // Free text still submits, which matters because a phone number is a valid value: the
+    // bridge expands it to the @lid chat the contact actually writes from.
+    attachChatPicker(triggerRow, valueInput, kind) {
+        let datalist = triggerRow.querySelector('datalist.chat-options');
+        if (!datalist) {
+            datalist = document.createElement('datalist');
+            datalist.className = 'chat-options';
+            datalist.id = `chatOptions${++this.chatPickerSeq}`;
+            triggerRow.appendChild(datalist);
+        }
+        valueInput.setAttribute('list', datalist.id);
+
+        if (valueInput.dataset.chatPickerKind === kind) {
+            return; // already wired for this kind; don't stack listeners
+        }
+        valueInput.dataset.chatPickerKind = kind;
+
+        const refresh = async () => {
+            const chats = await this.fetchChats(valueInput.value.trim(), valueInput.dataset.chatPickerKind);
+            this.renderChatOptions(datalist, chats);
+        };
+
+        if (!valueInput.dataset.chatPickerBound) {
+            valueInput.dataset.chatPickerBound = 'true';
+            let debounce = null;
+            valueInput.addEventListener('input', () => {
+                clearTimeout(debounce);
+                debounce = setTimeout(refresh, 250);
+            });
+        }
+
+        refresh();
+    }
+
+    async fetchChats(query, kind) {
+        const params = new URLSearchParams({ limit: '25' });
+        if (query) params.set('q', query);
+        if (kind && kind !== 'all') params.set('type', kind);
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chats?${params}`);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return Array.isArray(data.data) ? data.data : [];
+        } catch (error) {
+            // A picker that cannot reach the bridge must not block typing a value by hand.
+            console.error('Failed to load chats:', error);
+            return [];
+        }
+    }
+
+    renderChatOptions(datalist, chats) {
+        datalist.innerHTML = '';
+        chats.forEach(chat => {
+            const option = document.createElement('option');
+            // The value is what lands in the trigger; the label is what the user reads.
+            option.value = chat.jid;
+            const name = chat.name && chat.name !== chat.jid.split('@')[0] ? chat.name : '';
+            option.textContent = name
+                ? `${name}${chat.is_group ? ' (group)' : ''}`
+                : (chat.is_group ? 'Group' : 'Contact');
+            datalist.appendChild(option);
+        });
     }
 
     async handleFormSubmit(e) {

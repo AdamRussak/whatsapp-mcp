@@ -319,3 +319,70 @@ func (store *MessageStore) ListAudioMessages(chatJIDs []string, after, before st
 
 	return result, rows.Err()
 }
+
+// ChatSummary is one row of the chat list the UI's picker offers. It carries only what the
+// picker shows and writes into a trigger: never message content.
+type ChatSummary struct {
+	JID             string `json:"jid"`
+	Name            string `json:"name"`
+	LastMessageTime string `json:"last_message_time"`
+	IsGroup         bool   `json:"is_group"`
+}
+
+// Chat kinds accepted by ListChats.
+const (
+	ChatKindAll     = "all"
+	ChatKindContact = "contact"
+	ChatKindGroup   = "group"
+)
+
+// ListChats returns chats for the picker, newest conversation first.
+//
+// query is an optional case-insensitive substring of the name or the JID; kind narrows to
+// 1:1 chats or groups. Read-only, with every column named, per §4.2.
+//
+// Note on names: chats.name falls back to the JID's user part when a contact never
+// resolved, so a row can legitimately read as a bare number. That is what the chat is
+// called here; inventing a friendlier label would be a guess.
+func (store *MessageStore) ListChats(query, kind string, limit int) ([]ChatSummary, error) {
+	sqlQuery := `SELECT jid, name, last_message_time FROM chats WHERE 1 = 1`
+	var args []interface{}
+
+	switch kind {
+	case ChatKindContact:
+		sqlQuery += ` AND jid NOT LIKE '%@g.us' AND jid NOT LIKE '%@broadcast'`
+	case ChatKindGroup:
+		sqlQuery += ` AND jid LIKE '%@g.us'`
+	}
+
+	if query != "" {
+		// LIKE is case-insensitive for ASCII in SQLite; LOWER covers the rest well enough
+		// for a picker, and both sides are parameterised.
+		sqlQuery += ` AND (LOWER(name) LIKE ? OR LOWER(jid) LIKE ?)`
+		pattern := "%" + strings.ToLower(query) + "%"
+		args = append(args, pattern, pattern)
+	}
+
+	sqlQuery += ` ORDER BY last_message_time DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := store.db.Query(sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	chats := make([]ChatSummary, 0, limit)
+	for rows.Next() {
+		var chat ChatSummary
+		var name, lastMessageTime sql.NullString
+		if err := rows.Scan(&chat.JID, &name, &lastMessageTime); err != nil {
+			return nil, err
+		}
+		chat.Name = name.String
+		chat.LastMessageTime = lastMessageTime.String
+		chat.IsGroup = strings.HasSuffix(chat.JID, "@g.us")
+		chats = append(chats, chat)
+	}
+	return chats, rows.Err()
+}

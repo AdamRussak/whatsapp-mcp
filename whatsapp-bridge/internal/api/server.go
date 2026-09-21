@@ -72,6 +72,9 @@ func (s *Server) registerHandlers() {
 	http.HandleFunc("/api/download/batch/", CorsMiddleware(s.handleBatchJobByID))
 	http.HandleFunc("/api/media/", CorsMiddleware(s.handleServeMedia))
 
+	// Chat list, for the UI's trigger picker
+	http.HandleFunc("/api/chats", CorsMiddleware(s.handleChats))
+
 	// Webhook management endpoints
 	http.HandleFunc("/api/webhooks", CorsMiddleware(s.handleWebhooks))
 	http.HandleFunc("/api/webhooks/", CorsMiddleware(s.handleWebhookByID))

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -691,4 +692,55 @@ func (s *Server) handleServeMedia(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", contentType)
 	http.ServeFile(w, r, targetPath)
+}
+
+// maxChatPickerLimit caps what one request can pull out of a 3,900-row chat list.
+const (
+	defaultChatLimit = 50
+	maxChatLimit     = 200
+)
+
+// handleChats lists chats for the UI's trigger picker (GET /api/chats).
+//
+// Query: q (case-insensitive substring of name or JID), type (all|contact|group),
+// limit (default 50, capped at 200).
+func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	kind := r.URL.Query().Get("type")
+	switch kind {
+	case "", database.ChatKindAll:
+		kind = database.ChatKindAll
+	case database.ChatKindContact, database.ChatKindGroup:
+	default:
+		SendJSONError(w, "type must be all, contact or group", http.StatusBadRequest)
+		return
+	}
+
+	limit := defaultChatLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			SendJSONError(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	if limit > maxChatLimit {
+		limit = maxChatLimit
+	}
+
+	chats, err := s.messageStore.ListChats(strings.TrimSpace(r.URL.Query().Get("q")), kind, limit)
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to list chats: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	SendJSON(w, map[string]interface{}{
+		"success": true,
+		"data":    chats,
+	})
 }
