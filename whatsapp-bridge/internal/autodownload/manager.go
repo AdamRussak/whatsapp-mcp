@@ -194,9 +194,14 @@ func (m *Manager) release(key string) {
 	m.mu.Unlock()
 }
 
-// QueueDepth returns the number of jobs waiting. Used by tests and logging.
+// QueueDepth returns the number of jobs waiting. Used by tests, logging and /api/health.
 func (m *Manager) QueueDepth() int {
 	return len(m.queue)
+}
+
+// Workers returns the size of the pool, for /api/health.
+func (m *Manager) Workers() int {
+	return m.workers
 }
 
 func (m *Manager) worker(id int) {

@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 
+	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 func TestHandleConnectionEvent_ClientOutdated_NilID(t *testing.T) {

@@ -126,6 +126,9 @@ func main() {
 
 	// Start REST API server with webhook and media download support
 	server := api.NewServer(client, messageStore, mediaStore, webhookManager, cfg.APIPort, cfg.StoreDir, cfg.DownloadPaceMs, cfg.PublicBaseURL)
+	if autoDownloader != nil {
+		server.SetAutoDownloadStatus(autoDownloader)
+	}
 	server.Start()
 
 	// Create a channel to keep the main goroutine alive

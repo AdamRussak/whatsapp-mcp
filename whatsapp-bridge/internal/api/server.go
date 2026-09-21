@@ -9,6 +9,13 @@ import (
 	"whatsapp-bridge/internal/whatsapp"
 )
 
+// AutoDownloadStatus is what /api/health reports about the capture pool. It is satisfied by
+// *autodownload.Manager; nil means auto-download is switched off.
+type AutoDownloadStatus interface {
+	Workers() int
+	QueueDepth() int
+}
+
 // Server represents the HTTP API server
 type Server struct {
 	client         *whatsapp.Client
@@ -19,6 +26,13 @@ type Server struct {
 	storeDir       string
 	paceMs         int
 	publicBaseURL  string
+	autoDownload   AutoDownloadStatus
+}
+
+// SetAutoDownloadStatus attaches the capture pool so /api/health can report it. Left unset,
+// health reports auto-download as disabled.
+func (s *Server) SetAutoDownloadStatus(status AutoDownloadStatus) {
+	s.autoDownload = status
 }
 
 // NewServer creates a new API server instance
@@ -71,6 +85,9 @@ func (s *Server) registerHandlers() {
 	http.HandleFunc("/api/download/batch", CorsMiddleware(s.handleDownloadBatch))
 	http.HandleFunc("/api/download/batch/", CorsMiddleware(s.handleBatchJobByID))
 	http.HandleFunc("/api/media/", CorsMiddleware(s.handleServeMedia))
+
+	// Health, for deploy checks and monitoring
+	http.HandleFunc("/api/health", CorsMiddleware(s.handleHealth))
 
 	// Chat list, for the UI's trigger picker
 	http.HandleFunc("/api/chats", CorsMiddleware(s.handleChats))

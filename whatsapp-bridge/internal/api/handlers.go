@@ -744,3 +744,43 @@ func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
 		"data":    chats,
 	})
 }
+
+// handleHealth reports what the RUNNING bridge is, not what was built (GET /api/health).
+//
+// This exists because "Built" and "Up/healthy" both lie after a redeploy that started a
+// stale container instead of replacing it — which has happened twice (§2.10, §2.15). The
+// schema version here is the honest answer to "did my deploy actually take effect?".
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	schemaVersion, err := s.messageStore.SchemaVersion()
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to read schema version: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	autoDownload := map[string]interface{}{"enabled": false}
+	if s.autoDownload != nil {
+		autoDownload = map[string]interface{}{
+			"enabled":     true,
+			"workers":     s.autoDownload.Workers(),
+			"queue_depth": s.autoDownload.QueueDepth(),
+		}
+	}
+
+	connected := false
+	if s.client != nil {
+		connected = s.client.IsConnected()
+	}
+
+	SendJSON(w, map[string]interface{}{
+		"success":            true,
+		"status":             "ok",
+		"schema_version":     schemaVersion,
+		"whatsapp_connected": connected,
+		"auto_download":      autoDownload,
+	})
+}

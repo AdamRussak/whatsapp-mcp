@@ -500,6 +500,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 | 6 | spot-check 5 old rows before/after | byte-identical |
 | 7 | `docker compose up -d --build --force-recreate` — **always `--force-recreate`**, never plain `--build`. This has now bitten twice (§2.10, §2.15): a stopped or unchanged container is *started*, not replaced, so the freshly built image never runs | healthy, **and the log prints the expected schema version** — that is the proof, not "Built" or "Up/healthy" |
 | 8 | steps 5–6 on live DB (read-only) | same |
+| 8b | `./scripts/smoke.sh` (set `EXPECT_SCHEMA` to the version this deploy lands on) | `0 failed`; this is what proves the new binary and the new UI are the ones actually running |
 | 9 | once: rollback drill on the copy with the old image | old binary serves `/api/webhooks` |
 
 ### 4.7 Code-review blockers
@@ -787,7 +788,7 @@ type Downloader interface {
 
 `transcribe_voice_message(message_id, chat_jid, language)` MCP tool with `faster-whisper` or an API backend; cache in a `transcripts` table; add `transcript` to `list_messages`; optional `transcribe: true` on auto-download rules.
 
-### Phase 7 — Listener ergonomics, retention and a downloads view ❌ (planned 2026-09-21)
+### Phase 7 — Listener ergonomics, retention and a downloads view 🟡 (7.1 ✅, 7.2 ✅, rest ❌)
 
 Four items from §2.16, in the order they should land. The sequence is deliberate: the chat
 picker unblocks two UIs, the health endpoint and smoke check make every later deploy
@@ -802,7 +803,7 @@ should land on a codebase that already has a test harness and a post-deploy chec
 > enumerate the address book and the media index. This is a conscious trade, recorded so it
 > is not rediscovered later.
 
-#### 7.1 Chat picker
+#### 7.1 Chat picker ✅ (deployed 2026-09-21 12:17 UTC)
 
 A rule still means typing an identifier. B11 made phone numbers work; it did not make them
 discoverable (§2.16 G-c).
@@ -822,7 +823,7 @@ discoverable (§2.16 G-c).
   resolved, so some rows will show a bare LID (the live `62156783493249@lid` reads
   `14018823594220`). Display it as-is; inventing a nicer label would be guessing.
 
-#### 7.2 Health endpoint and deploy smoke check
+#### 7.2 Health endpoint and deploy smoke check ✅ (deployed 2026-09-21 12:3x UTC)
 
 The two failures that cost time today were deployment-shaped, not logic-shaped: a stale
 container served old assets while everything reported "Built" and "Up/healthy" (§2.10,
@@ -836,7 +837,22 @@ container served old assets while everything reported "Built" and "Up/healthy" (
   - Bridge: `/api/health` reports the expected schema version; `/api/webhooks` returns 200 and
     every entry carries `auto_download` and `auto_download_voice_only`; `/api/chats?limit=1`
     and `/api/downloads?limit=1` answer 200.
-- Add it to §4.6 as the step that closes a deploy.
+- Add it to §4.6 as the step that closes a deploy. ✅ step 8b.
+
+**Shipped as described**, and verified to fail correctly: pointed at a bridge without the
+endpoint it reported `/api/health returned 404`; with `EXPECT_SCHEMA=4` against a v3 bridge
+it reported a probable stale container; against a bare nginx it reported the UI markers
+missing. 16 checks pass against the live system.
+
+Two bugs found while writing it, both worth remembering because each made the script lie in
+the *reassuring* direction:
+- `STATUS` was set inside a command substitution, so the caller never saw it — a subshell
+  assignment cannot reach its parent.
+- `printf '%s' "$body" | grep -q X` under `set -o pipefail` reports **failure on an early
+  match**: `grep -q` exits at the first hit, `printf` takes SIGPIPE, and `pipefail` adopts
+  printf's status. A string near the top of the file looked absent while one further down
+  looked present. Content checks now use shell substring matching (`[[ $body == *X* ]]`),
+  no pipeline.
 
 #### 7.3 Downloads endpoint and view
 
