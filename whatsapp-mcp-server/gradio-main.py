@@ -2,6 +2,7 @@ import os
 import logging
 import gradio as gr
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -15,6 +16,8 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
+    start_chat_audio_download as whatsapp_start_chat_audio_download,
+    get_download_job as whatsapp_get_download_job,
     get_contact_by_jid as whatsapp_get_contact_by_jid,
     get_contact_by_phone as whatsapp_get_contact_by_phone,
     list_all_contacts as whatsapp_list_all_contacts,
@@ -35,8 +38,11 @@ logging.basicConfig(
 mcp = FastMCP(
     "whatsapp",
     log_level="DEBUG" if os.environ.get('DEBUG') == 'true' else "INFO",
-    auth_required=os.environ.get('DANGEROUSLY_OMIT_AUTH') != 'true',
-    
+    host=os.environ.get('HOST', '0.0.0.0'),
+    port=int(os.environ.get('PORT', '8081')),
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
 )
 
 # Define MCP tools (these will be exposed through both MCP and Gradio)
@@ -266,6 +272,35 @@ def download_media(message_id: str, chat_jid: str) -> str:
             "message": "Failed to download media"
         }
     return str(result)
+
+@mcp.tool()
+def batch_download_chat_audio(chat: str, limit: int = 5000, skip_cached: bool = True, retry_failed: bool = False) -> str:
+    """Start batch downloading all audio/voice messages for a chat or contact.
+    
+    Parameters:
+    - chat: Phone number, user JID (@s.whatsapp.net or @lid), or group JID (@g.us)
+    - limit: Maximum number of audio messages to process (default: 5000)
+    - skip_cached: Skip messages that are already downloaded locally (default: True)
+    - retry_failed: Retry previously failed downloads (default: False)
+    """
+    try:
+        res = whatsapp_start_chat_audio_download(chat=chat, limit=limit, skip_cached=skip_cached, retry_failed=retry_failed)
+        return json.dumps(res, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+@mcp.tool()
+def get_audio_download_progress(job_id: str) -> str:
+    """Check progress and status of an ongoing or completed chat audio batch download.
+    
+    Parameters:
+    - job_id: The ID of the download job (e.g. job_20260919_073000_123)
+    """
+    try:
+        res = whatsapp_get_download_job(job_id)
+        return json.dumps(res, indent=2)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
 
 @mcp.tool()
 def get_contact_details(chat_jid: str) -> str:

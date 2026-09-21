@@ -18,6 +18,14 @@ WHATSAPP_DB_PATH = os.path.join('/app', 'store', 'whatsapp.db')
 BRIDGE_HOST = os.getenv('BRIDGE_HOST', 'localhost')
 WHATSAPP_API_BASE_URL = f"http://{BRIDGE_HOST}:8080/api"
 
+def _ro(path: str) -> sqlite3.Connection:
+    """Open SQLite connection in read-only mode with busy timeout."""
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+
+def _rw_messages() -> sqlite3.Connection:
+    """Open messages.db connection in read-write mode exclusively for contact nicknames."""
+    return sqlite3.connect(MESSAGES_DB_PATH, timeout=5)
+
 @dataclass
 class Message:
     timestamp: datetime
@@ -69,7 +77,7 @@ def get_sender_name(sender_jid: str) -> str:
             return nickname
         
         # Try to get rich contact information from WhatsApp store
-        whatsapp_conn = sqlite3.connect(WHATSAPP_DB_PATH)
+        whatsapp_conn = _ro(WHATSAPP_DB_PATH)
         whatsapp_cursor = whatsapp_conn.cursor()
         
         # Look for contact in WhatsApp contacts
@@ -89,7 +97,7 @@ def get_sender_name(sender_jid: str) -> str:
             return full_name or push_name or first_name or business_name or sender_jid
         
         # Fall back to chat database
-        messages_conn = sqlite3.connect(MESSAGES_DB_PATH)
+        messages_conn = _ro(MESSAGES_DB_PATH)
         messages_cursor = messages_conn.cursor()
         
         # First try matching by exact JID
@@ -286,7 +294,8 @@ def get_message_context(
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        # Connect to messages database
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         # Get the target message first
@@ -384,7 +393,7 @@ def list_chats(
     print(f"Debug: Database exists: {os.path.exists(MESSAGES_DB_PATH)}")
     
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         # Debug: Check if tables exist
@@ -466,7 +475,7 @@ def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number using both WhatsApp contacts and chat data."""
     try:
         # Connect to both databases
-        whatsapp_conn = sqlite3.connect(WHATSAPP_DB_PATH)
+        whatsapp_conn = _ro(WHATSAPP_DB_PATH)
         whatsapp_cursor = whatsapp_conn.cursor()
         
         # Split query into characters to support partial matching
@@ -538,7 +547,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -583,7 +592,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -632,7 +641,7 @@ def get_last_interaction(jid: str) -> str:
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
     """Get chat metadata by JID."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         query = """
@@ -680,7 +689,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -838,14 +847,21 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             "chat_jid": chat_jid
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, timeout=90)
         
         if response.status_code == 200:
             result = response.json()
             if result.get("success", False):
-                path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
-                return path
+                rel_path = result.get("path", "")
+                local_path = os.path.join('/app', 'store', rel_path)
+                if not os.path.exists(local_path):
+                    store_candidate = os.path.join('store', rel_path)
+                    if os.path.exists(store_candidate):
+                        local_path = store_candidate
+                    elif result.get("abs_path"):
+                        local_path = result.get("abs_path")
+                print(f"Media downloaded successfully: {local_path}")
+                return local_path
             else:
                 print(f"Download failed: {result.get('message', 'Unknown error')}")
                 return None
@@ -863,11 +879,45 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
         print(f"Unexpected error: {str(e)}")
         return None
 
+def start_chat_audio_download(
+    chat: str,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    limit: int = 5000,
+    skip_cached: bool = True,
+    retry_failed: bool = False
+) -> dict:
+    """Start an asynchronous batch download of audio messages for a chat or contact."""
+    url = f"{WHATSAPP_API_BASE_URL}/download/batch"
+    payload = {
+        "chat": chat,
+        "limit": limit,
+        "skip_cached": skip_cached,
+        "retry_failed": retry_failed
+    }
+    if after:
+        payload["after"] = after
+    if before:
+        payload["before"] = before
+
+    response = requests.post(url, json=payload, timeout=30)
+    if response.status_code in (200, 202):
+        return response.json()
+    raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+
+def get_download_job(job_id: str) -> dict:
+    """Get the current progress/status of a batch download job."""
+    url = f"{WHATSAPP_API_BASE_URL}/download/batch/{job_id}"
+    response = requests.get(url, timeout=10)
+    if response.status_code == 200:
+        return response.json()
+    raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+
 def get_contact_by_jid(jid: str) -> Optional[Contact]:
     """Get detailed contact information by JID."""
     try:
         # First try WhatsApp contacts database
-        whatsapp_conn = sqlite3.connect(WHATSAPP_DB_PATH)
+        whatsapp_conn = _ro(WHATSAPP_DB_PATH)
         whatsapp_cursor = whatsapp_conn.cursor()
         
         whatsapp_cursor.execute("""
@@ -899,7 +949,7 @@ def get_contact_by_jid(jid: str) -> Optional[Contact]:
             )
         
         # Fall back to chats database
-        messages_conn = sqlite3.connect(MESSAGES_DB_PATH)
+        messages_conn = _ro(MESSAGES_DB_PATH)
         messages_cursor = messages_conn.cursor()
         
         messages_cursor.execute("""
@@ -1054,7 +1104,7 @@ def format_contact_info(contact: Contact) -> str:
 def set_contact_nickname(jid: str, nickname: str) -> Tuple[bool, str]:
     """Set a custom nickname for a contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _rw_messages()
         cursor = conn.cursor()
         
         # Insert or update nickname
@@ -1076,7 +1126,7 @@ def set_contact_nickname(jid: str, nickname: str) -> Tuple[bool, str]:
 def get_contact_nickname(jid: str) -> Optional[str]:
     """Get a contact's custom nickname."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -1099,7 +1149,7 @@ def get_contact_nickname(jid: str) -> Optional[str]:
 def remove_contact_nickname(jid: str) -> Tuple[bool, str]:
     """Remove a contact's custom nickname."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _rw_messages()
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM contact_nicknames WHERE jid = ?", (jid,))
@@ -1120,7 +1170,7 @@ def remove_contact_nickname(jid: str) -> Tuple[bool, str]:
 def list_contact_nicknames() -> List[Tuple[str, str]]:
     """List all custom contact nicknames."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _ro(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute("""

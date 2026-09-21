@@ -24,6 +24,8 @@ Built with a containerized microservices architecture, this system offers profes
 - **Pattern Matching**: Support for exact match, contains, and regex pattern matching
 - **Retry Logic**: Exponential backoff retry mechanism with comprehensive logging
 - **Security**: HMAC-SHA256 signature authentication for webhook endpoints
+- **Auto-Download**: A listener can capture matched voice notes to disk as they arrive, before WhatsApp's CDN links expire (~11–19 days)
+- **LID-Aware Matching**: Trigger values given as phone numbers also match the `@lid` chats WhatsApp now uses for 1:1 conversations
 - **Web UI**: Modern responsive web interface for webhook management
 
 ### 👥 Enhanced Contact Management
@@ -143,12 +145,39 @@ This application consists of three main containerized services:
 
 ### Webhook System
 
+A webhook entry is a **listener**: its triggers decide which messages it matches, and its
+actions decide what happens to them. Posting to a URL is one action; auto-downloading the
+matched audio is another. An entry may do either or both.
+
 #### Configuration Options
 - **Trigger Types**: all, chat_jid, sender, keyword, media_type
 - **Match Types**: exact, contains, regex
 - **Delivery**: Asynchronous with exponential backoff
 - **Security**: HMAC-SHA256 signature authentication
-- **Logging**: Comprehensive delivery logs and status tracking
+- **Logging**: Delivery *and* capture outcomes, per listener
+- **`auto_download`** (bool): download matched audio as it arrives
+- **`auto_download_voice_only`** (bool, default `true`): voice notes only; `false` also takes forwarded music and attached audio files
+- **`webhook_url`**: required *unless* `auto_download` is on — a listener with auto-download and no URL captures media and posts nowhere
+
+> **Phone numbers vs LID.** WhatsApp moved 1:1 chats to LID addressing, so a contact saved as
+> `972547669192` now sends from something like `62156783493249@lid`. Exact `sender` and
+> `chat_jid` trigger values are expanded through WhatsApp's LID map when configs load, so
+> typing the phone number works. `contains` and `regex` values are left exactly as written.
+
+#### Example: capture a contact's voice notes (no HTTP delivery)
+```json
+{
+  "name": "Capture voice notes",
+  "webhook_url": "",
+  "enabled": true,
+  "auto_download": true,
+  "auto_download_voice_only": true,
+  "triggers": [
+    { "trigger_type": "sender", "trigger_value": "972547669192", "match_type": "exact", "enabled": true }
+  ]
+}
+```
+Files land in `store/media/<chat>/` and each capture is recorded in that listener's logs.
 
 #### Example Webhook Configuration
 ```json
@@ -198,6 +227,45 @@ This application consists of three main containerized services:
 - **Metadata Extraction**: Comprehensive media information and thumbnails
 - **Size Optimization**: Automatic compression for large files
 
+#### Voice Note Auto-Capture
+WhatsApp CDN links for media expire after roughly 11–19 days, after which a voice note
+cannot be recovered — a media retry returns a copy encrypted under a key the bridge never
+receives. A listener with `auto_download` on closes that window by downloading matched audio
+within seconds of arrival.
+
+- Capture happens **after** the message is stored and **never** inside the WhatsApp event
+  handler: matches are queued to a small worker pool (2 by default), and a full queue drops
+  the job with a warning rather than delaying message handling.
+- Captures skip media retry entirely, so no retry receipt is ever sent to anyone's phone for
+  live media.
+- Outcomes are written to that listener's logs (`event_type: auto_download`) and to
+  `store/media.db`. Files are named `<date>_<me|them>_<message id>.ogg`.
+- View-once audio is never captured: no key or URL is stored for it by design.
+
+#### Retention
+A listener can keep its captures for a set number of days ("Keep captured files for" in
+the UI, `retention_days` in the API; blank or 0 keeps them forever). Retention is the only
+code that deletes files, so it keeps a file whenever anything is unclear:
+
+- It only removes files a listener **captured**. Files you fetched by hand
+  (`POST /api/download`, batch jobs) are never touched — nor anything captured before
+  capture logging existed.
+- A file goes only when **every** listener that captured it has an expired retention; one
+  listener that keeps forever, is disabled, or has not yet expired keeps it.
+- Only `.ogg`/`.mp3` files under `store/media/` can be removed, never through a symlink,
+  at most 500 per sweep. Each removal appears as `REMOVED` in that listener's logs, and the
+  record becomes `pruned`, so no batch run downloads it again (`retry_failed` or
+  `"force": true` re-fetches on purpose).
+- It ships in **dry run**. Check `GET /api/retention/preview`, then set
+  `RETENTION_DRY_RUN=false` and redeploy.
+
+To see what retention would do on a later date, against a copy of the store:
+```bash
+STORE_DIR=../store-test go run ./cmd/retention -at 2026-12-01          # read-only
+touch ../store-test/REHEARSAL                                            # opt in to deleting
+STORE_DIR=../store-test go run ./cmd/retention -at 2026-12-01 -apply    # on the copy only
+```
+
 ## 🔧 MCP Tools Reference
 
 ### Core Messaging Tools
@@ -242,9 +310,37 @@ Content-Type: application/json
   "media_path": "/path/to/file.jpg"
 }
 
-# Download media
-GET /api/download?message_id=MESSAGE_ID&chat_jid=CHAT_JID
+# Download one message's media (writes to store/media/<chat>/)
+POST /api/download
+Content-Type: application/json
+
+{ "message_id": "MESSAGE_ID", "chat_jid": "CHAT_JID" }
+
+# Download a chat's audio history as a background job
+POST /api/download/batch
+{ "chat": "972547669192", "media_type": "voice", "limit": 500, "skip_cached": true }
+
+GET    /api/download/batch/{job_id}     # progress
+DELETE /api/download/batch/{job_id}     # cancel a running job
+
+# Stream a downloaded file (range requests supported; .ogg/.mp3 only; ?download=1 to save)
+GET /api/media/{chat}/{filename}
+
+# Downloaded files with the message behind each (chat, after, before, status, limit, offset)
+GET /api/downloads
+
+# Chats for pickers, searchable by name or phone number (q, type=all|contact|group, limit)
+GET /api/chats
+
+# What the next retention sweep would remove — read-only
+GET /api/retention/preview
+
+# Schema version, WhatsApp connection, auto-download pool and retention mode
+GET /api/health
 ```
+
+A download removed by retention returns **410 Gone** from `POST /api/download` unless the
+body sets `"force": true`.
 
 #### Webhook Management
 ```bash
@@ -264,9 +360,16 @@ POST /api/webhooks
 # Test webhook
 POST /api/webhooks/{id}/test
 
-# View webhook logs
-GET /api/webhook-logs?webhook_id={id}
+# View one listener's logs — deliveries and captures
+GET /api/webhooks/{id}/logs
+
+# All logs
+GET /api/webhook-logs
 ```
+
+Log entries carry `event_type`: `delivery` for an HTTP post, `auto_download` for a capture.
+A capture row has no status code — `delivered_at` is set when the file landed, and
+`response_body` holds the saved path.
 
 ## 🔐 Security Features
 
@@ -315,12 +418,32 @@ webhook-ui:
 ```bash
 # Bridge Service
 TZ=UTC
+STORE_DIR=store                  # where the databases and media live
+API_PORT=8080
+PUBLIC_BASE_URL=http://whatsapp-mcp-whatsapp-bridge-1:8080   # used in download_url / webhook payloads
+DOWNLOAD_PACE_MS=250             # delay between items in a batch job
+MEDIA_RETRY_TIMEOUT_S=30
+
+# Auto-download (operational only — *which* chats are captured is set per listener in the UI)
+AUTO_DOWNLOAD=on                 # kill switch for the whole pool; leaves every rule untouched
+AUTO_DOWNLOAD_WORKERS=2
+AUTO_DOWNLOAD_QUEUE_SIZE=100
+AUTO_DOWNLOAD_TIMEOUT_S=60
+
+# Retention (how long is set per listener in the UI; these are operational only)
+RETENTION=on                     # off keeps every file, whatever the listeners say
+RETENTION_DRY_RUN=true           # report only; only an explicit false deletes, a typo keeps dry run
+RETENTION_SWEEP_INTERVAL_M=60
+RETENTION_MAX_PER_SWEEP=500      # cap per sweep, oldest expiry first
 
 # MCP Service
 BRIDGE_HOST=whatsapp-bridge
 DEBUG=true
 TZ=UTC
 ```
+
+The bridge also sets `stop_grace_period: 30s` so shutdown can finish a download already in
+progress before the WhatsApp connection closes.
 
 ### Networking
 - **Internal Network**: `whatsapp_internal` for service communication
@@ -343,9 +466,17 @@ docker-compose -f docker-compose.dev.yml up
 
 ### Testing
 ```bash
-# Run bridge tests
+# Run bridge tests (63 tests)
 cd whatsapp-bridge
 go test ./...
+go test ./... -race        # the auto-download pool is concurrent
+go vet ./...
+
+# Run the webhook UI tests (jsdom, in a node:22 container — no Node needed on the host)
+./scripts/test-ui.sh
+
+# After every deploy: check the RUNNING system, not the build output
+./scripts/smoke.sh               # set EXPECT_SCHEMA when a migration ships
 
 # Run MCP server tests
 cd whatsapp-mcp-server
@@ -381,6 +512,25 @@ docker-compose exec whatsapp-bridge sqlite3 /app/store/messages.db .backup backu
 - **Port Conflicts**: Check for conflicting services on ports 8080-8089
 - **Memory Issues**: Increase container memory limits in docker-compose.yml
 - **Storage Issues**: Ensure sufficient disk space for databases
+- **Your change didn't take effect**: always redeploy with
+  `docker compose up -d --build --force-recreate <service>`. Plain `--build` **starts an
+  existing container rather than replacing it**, so a freshly built image is silently
+  ignored and the old binary keeps running. This has bitten twice in this project. The UI is
+  a separate image (`Dockerfile.ui` bakes the static files in), so a change to
+  `whatsapp-webhook-ui/` needs `webhook-ui` rebuilt too — rebuilding only the bridge leaves
+  the browser on the old page. Verify by what the running system reports (the bridge logs
+  `messages.db schema version N` at startup), never by "Built" or "Up/healthy".
+
+#### Auto-Download Problems
+- **A rule captures nothing**: check the message is actually audio — images, video and
+  documents are never captured, whatever the trigger matches. Check the listener's logs for
+  `auto_download` rows.
+- **A rule with a phone number matches nothing**: this was fixed by LID expansion; confirm
+  the bridge logged `Trigger N (sender=…) also matches [...]` at startup. `contains` and
+  `regex` triggers are never expanded.
+- **Nothing in the Logs view**: a download-only listener writes capture rows, not delivery
+  rows. If the list is empty, nothing has matched yet.
+- **Disable everything without touching rules**: set `AUTO_DOWNLOAD=off` on the bridge.
 
 #### Webhook Problems
 - **Delivery Failures**: Check webhook endpoint accessibility and SSL certificates

@@ -5,14 +5,22 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"whatsapp-bridge/internal/database"
+	bridgetypes "whatsapp-bridge/internal/types"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
+
+// consecutiveSendFailures tracks back-to-back send errors to trigger a reconnect
+var consecutiveSendFailures int32
+
+const maxSendFailuresBeforeReconnect = 3
 
 // SendMessage sends a WhatsApp message with optional media
 func (c *Client) SendMessage(messageStore *database.MessageStore, recipient string, message string, mediaPath string) (bool, string) {
@@ -176,23 +184,35 @@ func (c *Client) SendMessage(messageStore *database.MessageStore, recipient stri
 	// Send message
 	sendResp, err := c.Client.SendMessage(context.Background(), recipientJID, msg)
 	if err != nil {
+		failures := atomic.AddInt32(&consecutiveSendFailures, 1)
+		fmt.Printf("Send failed (%d consecutive): %v\n", failures, err)
+		if failures >= maxSendFailuresBeforeReconnect {
+			fmt.Println("Too many consecutive send failures — reconnecting to WhatsApp to refresh session...")
+			atomic.StoreInt32(&consecutiveSendFailures, 0)
+			go func() {
+				c.Client.Disconnect()
+				time.Sleep(3 * time.Second)
+				if reconnErr := c.Client.Connect(); reconnErr != nil {
+					fmt.Printf("Auto-reconnect failed: %v\n", reconnErr)
+				} else {
+					fmt.Println("Auto-reconnect successful")
+				}
+			}()
+		}
 		return false, fmt.Sprintf("Error sending message: %v", err)
 	}
+
+	// Reset failure counter on success
+	atomic.StoreInt32(&consecutiveSendFailures, 0)
 
 	err = messageStore.StoreMessage(
 		sendResp.ID, // Use the ID from SendResponse
 		recipientJID.String(),
-		c.Store.ID.User,       // Use the client's user ID as sender
-		msg.GetConversation(), // Use the conversation text
-		sendResp.Timestamp,    // Use the Timestamp from SendResponse
-		true,                  // IsFromMe is true since we are sending this message
-		"",
-		"",
-		"",
-		nil, // Replace "" with nil for []byte arguments
-		nil, // Replace "" with nil for []byte arguments
-		nil, // Replace "" with nil for []byte arguments
-		0,
+		c.Store.ID.User,             // Use the client's user ID as sender
+		msg.GetConversation(),       // Use the conversation text
+		sendResp.Timestamp,          // Use the Timestamp from SendResponse
+		true,                        // IsFromMe is true since we are sending this message
+		bridgetypes.MediaMetadata{}, // text message, no media
 	)
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)

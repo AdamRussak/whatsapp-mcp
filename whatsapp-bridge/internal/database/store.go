@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -13,24 +14,48 @@ type MessageStore struct {
 	db *sql.DB
 }
 
-// NewMessageStore initializes a new message store with SQLite database
+// NewMessageStore initializes a new message store with SQLite database using STORE_DIR or default "store"
 func NewMessageStore() (*MessageStore, error) {
+	storeDir := os.Getenv("STORE_DIR")
+	if storeDir == "" {
+		storeDir = "store"
+	}
+	return NewMessageStoreWithDir(storeDir)
+}
+
+// NewMessageStoreWithDir initializes a message store in the specified directory
+func NewMessageStoreWithDir(storeDir string) (*MessageStore, error) {
+	if storeDir == "" {
+		storeDir = "store"
+	}
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
-	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	dbPath := filepath.Join(storeDir, "messages.db")
+	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_busy_timeout=5000", dbPath)
+
+	// Open SQLite database for messages with 5s busy timeout
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
+
+	// Limit connection pool to 1 connection to prevent concurrent writers from fighting over file locks
+	db.SetMaxOpenConns(1)
 
 	// Create tables if they don't exist
 	err = createTables(db)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create tables: %v", err)
+	}
+
+	// Apply schema migrations before anything can serve from this database
+	if err := runMigrations(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate message database: %w", err)
 	}
 
 	return &MessageStore{db: db}, nil
@@ -77,7 +102,10 @@ func createTables(db *sql.DB) error {
 			secret_token TEXT,
 			enabled BOOLEAN DEFAULT 1,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			auto_download BOOLEAN DEFAULT 0,
+			auto_download_voice_only BOOLEAN DEFAULT 1,
+			retention_days INTEGER DEFAULT 0
 		);
 
 		CREATE TABLE IF NOT EXISTS webhook_triggers (
@@ -101,7 +129,15 @@ func createTables(db *sql.DB) error {
 			response_body TEXT,
 			attempt_count INTEGER DEFAULT 1,
 			delivered_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			event_type TEXT DEFAULT 'delivery'
+		);
+
+		CREATE TABLE IF NOT EXISTS poll_options (
+			poll_id TEXT,
+			option_name TEXT,
+			option_hash TEXT,
+			PRIMARY KEY (poll_id, option_hash)
 		);
 	`)
 	return err

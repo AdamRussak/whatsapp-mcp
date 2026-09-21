@@ -190,6 +190,36 @@ header p {
     color: var(--error-color);
 }
 
+/* Marks a listener that captures matched media, alongside the enabled/disabled status */
+.webhook-autodownload {
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background-color: rgba(18, 140, 126, 0.1);
+    color: var(--secondary-color);
+}
+
+/* A number with its unit beside it */
+.inline-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.inline-field input {
+    width: 110px;
+}
+
+/* Explanatory line under a form field */
+.field-hint {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
 .webhook-actions {
     display: flex;
     gap: 5px;
@@ -719,4 +749,174 @@ header p {
     .log-detail-item strong {
         min-width: auto;
     }
+}
+
+/* The hidden attribute must win over any display rule below (e.g. the pager's flex),
+   which author CSS otherwise overrides. Nothing older in this UI uses the attribute. */
+[hidden] {
+    display: none !important;
+}
+
+/* ---- View switcher -------------------------------------------------------------- */
+
+.view-switcher {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.view-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    border: none;
+    border-bottom: 3px solid transparent;
+    background: none;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: -1px;
+    transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.view-tab:hover {
+    color: var(--text-primary);
+}
+
+.view-tab.active {
+    color: var(--accent-color);
+    border-bottom-color: var(--primary-color);
+}
+
+/* ---- Downloads ------------------------------------------------------------------ */
+
+.downloads-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+    padding: 16px;
+    margin-bottom: 20px;
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+}
+
+.filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 140px;
+}
+
+.filter-field.filter-chat {
+    flex: 1 1 260px;
+}
+
+.filter-field label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.filter-field input,
+.filter-field select {
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 14px;
+    background: #fff;
+}
+
+.filter-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* Only the table scrolls sideways on a narrow screen, never the page. */
+.downloads-table-wrap {
+    overflow-x: auto;
+}
+
+.downloads-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    font-size: 14px;
+}
+
+.downloads-table th {
+    text-align: left;
+    padding: 10px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+
+.downloads-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: middle;
+}
+
+.downloads-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.downloads-table tbody tr:hover {
+    background: var(--background-color);
+}
+
+.downloads-table .col-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.downloads-table .col-play audio {
+    height: 32px;
+    width: 220px;
+    max-width: 100%;
+}
+
+.downloads-table .col-save .btn-action {
+    background-color: rgba(18, 140, 126, 0.1);
+    color: var(--secondary-color);
+    text-decoration: none;
+}
+
+.downloads-table .col-save .btn-action:hover {
+    background-color: rgba(18, 140, 126, 0.2);
+}
+
+/* Failed, expired or missing files: shown for honesty, not for playing. */
+.downloads-table tr.download-unavailable td {
+    color: var(--text-muted);
+}
+
+.downloads-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin-top: 16px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+}
+
+.downloads-pager button:disabled {
+    opacity: 0.4;
+    cursor: default;
 }

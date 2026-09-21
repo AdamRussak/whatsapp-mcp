@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"whatsapp-bridge/internal/autodownload"
 	"whatsapp-bridge/internal/database"
 	"whatsapp-bridge/internal/types"
 	"whatsapp-bridge/internal/whatsapp"
@@ -15,23 +16,53 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// Manager handles webhook processing and delivery
-type Manager struct {
-	messageStore *database.MessageStore
-	logger       waLog.Logger
-	configs      []*types.WebhookConfig
-	mutex        sync.RWMutex
-	delivery     *DeliveryService
+// AutoDownloader receives the media of matched messages. It is satisfied by
+// *autodownload.Manager; the interface keeps the webhook manager testable on its own.
+type AutoDownloader interface {
+	Enqueue(job autodownload.Job) bool
 }
 
-// NewManager creates a new webhook manager
-func NewManager(messageStore *database.MessageStore, logger waLog.Logger) *Manager {
-	return &Manager{
-		messageStore: messageStore,
-		logger:       logger,
-		configs:      make([]*types.WebhookConfig, 0),
-		delivery:     NewDeliveryService(messageStore, logger),
+// Manager handles webhook processing and delivery
+type Manager struct {
+	messageStore   *database.MessageStore
+	logger         waLog.Logger
+	configs        []*types.WebhookConfig
+	mutex          sync.RWMutex
+	delivery       *DeliveryService
+	publicBaseURL  string
+	autoDownloader AutoDownloader
+	storeDir       string
+
+	// triggerAliases holds the other JIDs each exact sender/chat_jid trigger should also
+	// match, keyed by trigger ID. See buildTriggerAliases.
+	triggerAliases map[int][]string
+}
+
+// NewManager creates a new webhook manager. publicBaseURL is the address webhook
+// consumers can reach this bridge on; it appears in media_download_url.
+// storeDir is where whatsapp.db lives, used to expand phone numbers to the LID JIDs the
+// same contact actually writes from.
+func NewManager(messageStore *database.MessageStore, logger waLog.Logger, publicBaseURL, storeDir string) *Manager {
+	if publicBaseURL == "" {
+		publicBaseURL = "http://localhost:8080"
 	}
+	return &Manager{
+		messageStore:   messageStore,
+		logger:         logger,
+		configs:        make([]*types.WebhookConfig, 0),
+		delivery:       NewDeliveryService(messageStore, logger),
+		publicBaseURL:  strings.TrimRight(publicBaseURL, "/"),
+		storeDir:       storeDir,
+		triggerAliases: make(map[int][]string),
+	}
+}
+
+// SetAutoDownloader attaches the auto-download pool. Left unset (or set to nil), configs
+// with auto_download on still match and deliver; nothing is captured.
+func (wm *Manager) SetAutoDownloader(ad AutoDownloader) {
+	wm.mutex.Lock()
+	defer wm.mutex.Unlock()
+	wm.autoDownloader = ad
 }
 
 // LoadWebhookConfigs loads webhook configurations from database
@@ -45,6 +76,7 @@ func (wm *Manager) LoadWebhookConfigs() error {
 	}
 
 	wm.configs = configs
+	wm.triggerAliases = wm.buildTriggerAliases(configs)
 	wm.logger.Infof("Loaded %d webhook configurations", len(configs))
 
 	// Debug logging
@@ -79,7 +111,7 @@ func (wm *Manager) MatchesTriggers(msg *events.Message, chatName string) []*type
 
 	// Extract message content
 	content := whatsapp.ExtractTextContent(msg.Message)
-	mediaType, _, _, _, _, _, _ := whatsapp.ExtractMediaInfo(msg.Message)
+	mediaType := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID).MediaType
 
 	for _, config := range wm.configs {
 		if !config.Enabled {
@@ -113,13 +145,19 @@ func (wm *Manager) matchesTrigger(trigger types.WebhookTrigger, msg *events.Mess
 		return true
 
 	case "chat_jid":
-		return wm.matchesString(msg.Info.Chat.String(), trigger.TriggerValue, trigger.MatchType)
+		if wm.matchesString(msg.Info.Chat.String(), trigger.TriggerValue, trigger.MatchType) {
+			return true
+		}
+		return wm.matchesAlias(trigger, msg.Info.Chat.String())
 
 	case "sender":
 		senderJID := msg.Info.Sender.String()
 		senderUser := msg.Info.Sender.User
-		return wm.matchesString(senderJID, trigger.TriggerValue, trigger.MatchType) ||
-			wm.matchesString(senderUser, trigger.TriggerValue, trigger.MatchType)
+		if wm.matchesString(senderJID, trigger.TriggerValue, trigger.MatchType) ||
+			wm.matchesString(senderUser, trigger.TriggerValue, trigger.MatchType) {
+			return true
+		}
+		return wm.matchesAlias(trigger, senderJID, senderUser)
 
 	case "keyword":
 		return wm.matchesString(content, trigger.TriggerValue, trigger.MatchType)
@@ -157,7 +195,7 @@ func (wm *Manager) matchesString(text, pattern, matchType string) bool {
 }
 
 // ProcessMessage processes a message and sends webhooks if triggers match
-func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatName string) {
+func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatName string, pollInfo *types.PollInfo, pollVoteInfo *types.PollVoteInfo) {
 	startTime := time.Now()
 
 	// Find matching webhook configurations
@@ -170,37 +208,54 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 
 	// Extract message content and media info
 	content := whatsapp.ExtractTextContent(msg.Message)
-	mediaType, filename, _, _, _, _, _ := whatsapp.ExtractMediaInfo(msg.Message)
+	media := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID)
+	mediaType, filename := media.MediaType, media.Filename
+
+	// Capture the media for any matched listener that asks for it. This runs on the
+	// whatsmeow event path, so it only ever queues (§4.5) — never downloads.
+	wm.enqueueAutoDownloads(msg, media, chatName, matchedConfigs)
 
 	// Determine sender name
 	senderName := msg.Info.Sender.User
 	// Note: We'll need to handle contact lookup when integrating with the client
 
+	// Determine event type
+	eventType := "message_received"
+	if mediaType == "poll" {
+		eventType = "poll_created"
+	} else if mediaType == "poll_vote" {
+		eventType = "poll_vote"
+	}
+
 	// Build base payload
 	basePayload := types.WebhookPayload{
-		EventType: "message_received",
+		EventType: eventType,
 		Timestamp: msg.Info.Timestamp.Format(time.RFC3339),
 		Message: types.WebhookMessageInfo{
-			ID:         msg.Info.ID,
-			ChatJID:    msg.Info.Chat.String(),
-			ChatName:   chatName,
-			Sender:     msg.Info.Sender.String(),
-			SenderName: senderName,
-			Content:    content,
-			Timestamp:  msg.Info.Timestamp.Format(time.RFC3339),
-			PushName:   msg.Info.PushName,
-			IsFromMe:   msg.Info.IsFromMe,
-			MediaType:  mediaType,
-			Filename:   filename,
+			ID:           msg.Info.ID,
+			ChatJID:      msg.Info.Chat.String(),
+			ChatName:     chatName,
+			Sender:       msg.Info.Sender.String(),
+			SenderName:   senderName,
+			Content:      content,
+			Timestamp:    msg.Info.Timestamp.Format(time.RFC3339),
+			PushName:     msg.Info.PushName,
+			IsFromMe:     msg.Info.IsFromMe,
+			MediaType:    mediaType,
+			Filename:     filename,
+			IsPTT:        media.IsPTT,
+			Seconds:      media.Seconds,
+			PollInfo:     pollInfo,
+			PollVoteInfo: pollVoteInfo,
 		},
 		Metadata: types.WebhookMetadata{
 			ProcessingTimeMs: time.Since(startTime).Milliseconds(),
 		},
 	}
 
-	// Add media download URL if it's a media message
-	if mediaType != "" {
-		basePayload.Message.MediaDownloadURL = "http://localhost:8080/api/download"
+	// Add media download URL if it's a media message (not polls)
+	if mediaType != "" && mediaType != "poll" && mediaType != "poll_vote" {
+		basePayload.Message.MediaDownloadURL = wm.publicBaseURL + "/api/download"
 	}
 
 	// Add group info if it's a group chat
@@ -214,10 +269,15 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 
 	// Send webhooks for each matched configuration
 	for _, config := range matchedConfigs {
+		// A listener with auto-download on and no URL captures the media and posts nowhere.
+		if config.WebhookURL == "" {
+			continue
+		}
+
 		// Find the specific trigger that matched
 		var matchedTrigger *types.WebhookTrigger
 		content := whatsapp.ExtractTextContent(msg.Message)
-		mediaType, _, _, _, _, _, _ := whatsapp.ExtractMediaInfo(msg.Message)
+		mediaType := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID).MediaType
 
 		for _, trigger := range config.Triggers {
 			if trigger.Enabled && wm.matchesTrigger(trigger, msg, content, mediaType, chatName) {
@@ -246,4 +306,130 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 		// Send webhook asynchronously
 		go wm.delivery.DeliverWebhook(config, &payload, msg.Info.ID, msg.Info.Chat.String(), matchedTrigger)
 	}
+}
+
+// enqueueAutoDownloads queues the matched message's media for every listener that asked for
+// it. The triggers decide who is captured; these flags decide what:
+//
+//	audio ∧ (¬voiceOnly ∨ is_ptt) ∧ (url ∨ direct_path present)
+//
+// so a sender or keyword trigger that also matches text messages costs nothing here, and
+// view-once audio — deliberately stored without url, key or direct path (§2.11) — is never
+// queued for a download that could only fail.
+func (wm *Manager) enqueueAutoDownloads(msg *events.Message, media types.MediaMetadata, chatName string, matched []*types.WebhookConfig) {
+	wm.mutex.RLock()
+	downloader := wm.autoDownloader
+	wm.mutex.RUnlock()
+
+	if downloader == nil || media.MediaType != "audio" {
+		return
+	}
+	if media.URL == "" && media.DirectPath == "" {
+		return
+	}
+
+	for _, config := range matched {
+		if !config.AutoDownload {
+			continue
+		}
+		if config.VoiceOnly() && !media.IsPTT {
+			continue
+		}
+
+		// One job per message: the first listener that wants it queues it, and the pool
+		// drops a duplicate anyway. Attribution is that listener and the trigger that fired.
+		job := autodownload.Job{
+			MessageID: msg.Info.ID,
+			ChatJID:   msg.Info.Chat.String(),
+			RuleID:    config.ID,
+			RuleName:  config.Name,
+		}
+		if trigger := wm.firstMatchingTrigger(config, msg, chatName, media.MediaType); trigger != nil {
+			job.TriggerType, job.TriggerValue = trigger.TriggerType, trigger.TriggerValue
+		}
+		downloader.Enqueue(job)
+		return
+	}
+}
+
+// buildTriggerAliases resolves each exact sender/chat_jid trigger to the other JIDs that
+// belong to the same conversation, so a rule typed as a phone number still matches.
+//
+// This closes B11. WhatsApp moved 1:1 chats to LID addressing (§3.2 finding 6): a contact
+// saved as 972547669192 now writes from 62156783493249@lid, and matchesTrigger compares
+// raw strings. Without this, a rule entered as a phone number looks correct in the UI and
+// matches nothing, silently and forever. ResolveChatJIDs already does this expansion for
+// downloads; here it runs once per load rather than per message.
+//
+// Only exact triggers are expanded: extending a substring or a regex to other values would
+// change what the user wrote into something they did not.
+func (wm *Manager) buildTriggerAliases(configs []*types.WebhookConfig) map[int][]string {
+	aliases := make(map[int][]string)
+
+	for _, config := range configs {
+		for _, trigger := range config.Triggers {
+			if trigger.MatchType != "exact" || trigger.TriggerValue == "" {
+				continue
+			}
+			if trigger.TriggerType != "sender" && trigger.TriggerType != "chat_jid" {
+				continue
+			}
+
+			jids, err := whatsapp.ResolveChatJIDs(trigger.TriggerValue, wm.storeDir)
+			if err != nil {
+				wm.logger.Warnf("Could not expand trigger %d (%s=%s): %v",
+					trigger.ID, trigger.TriggerType, trigger.TriggerValue, err)
+				continue
+			}
+
+			var extra []string
+			for _, jid := range jids {
+				if jid == trigger.TriggerValue {
+					continue
+				}
+				extra = append(extra, jid)
+				// A sender is matched by bare user as well as by full JID.
+				if user, _, ok := strings.Cut(jid, "@"); ok && user != trigger.TriggerValue {
+					extra = append(extra, user)
+				}
+			}
+			if len(extra) > 0 {
+				aliases[trigger.ID] = extra
+				wm.logger.Infof("Trigger %d (%s=%s) also matches %v",
+					trigger.ID, trigger.TriggerType, trigger.TriggerValue, extra)
+			}
+		}
+	}
+
+	return aliases
+}
+
+// matchesAlias reports whether any of the message's identifiers equals one of the trigger's
+// resolved alternatives. Exact comparison only, by construction of buildTriggerAliases.
+func (wm *Manager) matchesAlias(trigger types.WebhookTrigger, candidates ...string) bool {
+	if trigger.MatchType != "exact" {
+		return false
+	}
+	for _, alias := range wm.triggerAliases[trigger.ID] {
+		for _, candidate := range candidates {
+			if candidate == alias {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// firstMatchingTrigger returns the trigger that made this config match, for attribution in
+// logs. It repeats the matching the caller already did, which is cheap and keeps the match
+// decision in exactly one place.
+func (wm *Manager) firstMatchingTrigger(config *types.WebhookConfig, msg *events.Message, chatName, mediaType string) *types.WebhookTrigger {
+	content := whatsapp.ExtractTextContent(msg.Message)
+	for i := range config.Triggers {
+		trigger := config.Triggers[i]
+		if trigger.Enabled && wm.matchesTrigger(trigger, msg, content, mediaType, chatName) {
+			return &config.Triggers[i]
+		}
+	}
+	return nil
 }

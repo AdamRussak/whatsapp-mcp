@@ -2,13 +2,17 @@ package whatsapp
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"whatsapp-bridge/internal/types"
 )
 
 // ExtractTextContent extracts text content from a WhatsApp message
@@ -24,32 +28,127 @@ func ExtractTextContent(msg *waProto.Message) string {
 		return extendedText.GetText()
 	}
 
-	// For now, we're ignoring non-text messages
+	// Check for poll creation message - return poll question as text content
+	if poll := GetPollCreationFromMessage(msg); poll != nil {
+		return poll.GetName()
+	}
+
 	return ""
 }
 
-// ExtractMediaInfo extracts media information from a WhatsApp message
-func ExtractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+// GetPollCreationFromMessage checks all poll creation message versions and returns the first non-nil one
+func GetPollCreationFromMessage(msg *waProto.Message) *waProto.PollCreationMessage {
 	if msg == nil {
-		return "", "", "", nil, nil, nil, 0
+		return nil
+	}
+	if p := msg.GetPollCreationMessage(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV2(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV3(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV5(); p != nil {
+		return p
+	}
+	if p := msg.GetPollCreationMessageV6(); p != nil {
+		return p
+	}
+	return nil
+}
+
+// ExtractPollInfo extracts poll creation information from a WhatsApp message
+func ExtractPollInfo(msg *waProto.Message) *types.PollInfo {
+	poll := GetPollCreationFromMessage(msg)
+	if poll == nil {
+		return nil
+	}
+
+	options := make([]types.PollOption, len(poll.GetOptions()))
+	for i, opt := range poll.GetOptions() {
+		optName := opt.GetOptionName()
+		optHash := sha256.Sum256([]byte(optName))
+		options[i] = types.PollOption{
+			Name:   optName,
+			SHA256: fmt.Sprintf("%x", optHash[:]),
+		}
+	}
+
+	return &types.PollInfo{
+		Question:        poll.GetName(),
+		Options:         options,
+		SelectableCount: poll.GetSelectableOptionsCount(),
+	}
+}
+
+// ExtractMediaInfo extracts media information from a WhatsApp message.
+//
+// msgID names the file for audio, so two voice notes in the same second no longer
+// collide (the old name was built from time.Now() at second resolution). Callers that
+// only need the media type may pass "".
+func ExtractMediaInfo(msg *waProto.Message, msgID string) types.MediaMetadata {
+	if msg == nil {
+		return types.MediaMetadata{}
+	}
+
+	// Check for poll creation message
+	if GetPollCreationFromMessage(msg) != nil {
+		return types.MediaMetadata{MediaType: "poll"}
+	}
+
+	// Check for poll update (vote) message
+	if msg.GetPollUpdateMessage() != nil {
+		return types.MediaMetadata{MediaType: "poll_vote"}
 	}
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
-			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
+		return types.MediaMetadata{
+			MediaType:     "image",
+			Filename:      "image_" + time.Now().Format("20060102_150405") + ".jpg",
+			URL:           img.GetURL(),
+			MediaKey:      img.GetMediaKey(),
+			FileSHA256:    img.GetFileSHA256(),
+			FileEncSHA256: img.GetFileEncSHA256(),
+			FileLength:    img.GetFileLength(),
+		}
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
-			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
+		return types.MediaMetadata{
+			MediaType:     "video",
+			Filename:      "video_" + time.Now().Format("20060102_150405") + ".mp4",
+			URL:           vid.GetURL(),
+			MediaKey:      vid.GetMediaKey(),
+			FileSHA256:    vid.GetFileSHA256(),
+			FileEncSHA256: vid.GetFileEncSHA256(),
+			FileLength:    vid.GetFileLength(),
+		}
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
-			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
+		// View-once audio is meant to vanish after playing: keep no decryption material
+		// for it, so nothing here can download it later.
+		if aud.GetViewOnce() {
+			return types.MediaMetadata{}
+		}
+		return types.MediaMetadata{
+			MediaType:     "audio",
+			Filename:      audioFilename(aud.GetPTT(), msgID),
+			URL:           aud.GetURL(),
+			MediaKey:      aud.GetMediaKey(),
+			FileSHA256:    aud.GetFileSHA256(),
+			FileEncSHA256: aud.GetFileEncSHA256(),
+			FileLength:    aud.GetFileLength(),
+			DirectPath:    aud.GetDirectPath(),
+			Mimetype:      aud.GetMimetype(),
+			Seconds:       aud.GetSeconds(),
+			IsPTT:         aud.GetPTT(),
+		}
 	}
 
 	// Check for document message
@@ -58,11 +157,31 @@ func ExtractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 		if filename == "" {
 			filename = "document_" + time.Now().Format("20060102_150405")
 		}
-		return "document", filename,
-			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
+		return types.MediaMetadata{
+			MediaType:     "document",
+			Filename:      filename,
+			URL:           doc.GetURL(),
+			MediaKey:      doc.GetMediaKey(),
+			FileSHA256:    doc.GetFileSHA256(),
+			FileEncSHA256: doc.GetFileEncSHA256(),
+			FileLength:    doc.GetFileLength(),
+		}
 	}
 
-	return "", "", "", nil, nil, nil, 0
+	return types.MediaMetadata{}
+}
+
+// audioFilename names a voice note or audio file after its message ID, falling back to a
+// timestamp when no ID is available.
+func audioFilename(isPTT bool, msgID string) string {
+	prefix := "audio_"
+	if isPTT {
+		prefix = "voice_"
+	}
+	if msgID == "" {
+		return prefix + time.Now().Format("20060102_150405") + ".ogg"
+	}
+	return prefix + msgID + ".ogg"
 }
 
 // AnalyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file
@@ -227,4 +346,47 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// MediaDownloader implements whatsmeow.DownloadableMessage for stored media metadata
+type MediaDownloader struct {
+	URL           string
+	DirectPath    string
+	MediaKey      []byte
+	FileLength    uint64
+	FileSHA256    []byte
+	FileEncSHA256 []byte
+	MediaType     whatsmeow.MediaType
+}
+
+func (d *MediaDownloader) GetDirectPath() string             { return d.DirectPath }
+func (d *MediaDownloader) GetURL() string                    { return d.URL }
+func (d *MediaDownloader) GetMediaKey() []byte               { return d.MediaKey }
+func (d *MediaDownloader) GetFileLength() uint64             { return d.FileLength }
+func (d *MediaDownloader) GetFileSHA256() []byte             { return d.FileSHA256 }
+func (d *MediaDownloader) GetFileEncSHA256() []byte          { return d.FileEncSHA256 }
+func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType { return d.MediaType }
+
+// ExtractDirectPathFromURL extracts the direct_path from a stored WhatsApp MMS URL.
+// The query string (ccb, oh, oe, _nc_sid) is part of the direct path: oh/oe authorize the
+// CDN request, and whatsmeow appends "&hash=..." to it. Only the URL-only mms3 flag is dropped.
+func ExtractDirectPathFromURL(url string) string {
+	parts := strings.SplitN(url, ".net/", 2)
+	if len(parts) < 2 {
+		return url
+	}
+	path, query, hasQuery := strings.Cut(parts[1], "?")
+	if !hasQuery {
+		return "/" + path
+	}
+	var kept []string
+	for _, param := range strings.Split(query, "&") {
+		if param != "" && param != "mms3=true" {
+			kept = append(kept, param)
+		}
+	}
+	if len(kept) == 0 {
+		return "/" + path
+	}
+	return "/" + path + "?" + strings.Join(kept, "&")
 }

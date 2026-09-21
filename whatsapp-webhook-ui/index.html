@@ -1,12 +1,14 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WhatsApp Webhook Manager</title>
     <link rel="stylesheet" href="styles.css">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
 </head>
+
 <body>
     <div class="container">
         <header>
@@ -14,7 +16,17 @@
             <p>Manage your webhook configurations</p>
         </header>
 
-        <main>
+        <!-- View switcher: listeners, and the media they captured -->
+        <nav class="view-switcher" role="tablist">
+            <button id="viewWebhooksBtn" class="view-tab active" role="tab" aria-selected="true" data-view="webhooks">
+                <i class="fas fa-bolt"></i> Webhooks
+            </button>
+            <button id="viewDownloadsBtn" class="view-tab" role="tab" aria-selected="false" data-view="downloads">
+                <i class="fas fa-download"></i> Downloads
+            </button>
+        </nav>
+
+        <main id="webhooksView">
             <!-- Action Buttons -->
             <div class="action-bar">
                 <button id="addWebhookBtn" class="btn btn-primary">
@@ -38,6 +50,70 @@
                 </div>
             </div>
         </main>
+
+        <!-- Downloads: every file the bridge saved, with the message behind it -->
+        <section id="downloadsView" hidden>
+            <form id="downloadsFilters" class="downloads-filters">
+                <div class="filter-field filter-chat">
+                    <label for="downloadsChat">Chat</label>
+                    <input type="text" id="downloadsChat" placeholder="All chats — search a name or number" autocomplete="off">
+                </div>
+                <div class="filter-field">
+                    <label for="downloadsFrom">From</label>
+                    <input type="date" id="downloadsFrom">
+                </div>
+                <div class="filter-field">
+                    <label for="downloadsTo">To</label>
+                    <input type="date" id="downloadsTo">
+                </div>
+                <div class="filter-field">
+                    <label for="downloadsStatus">Status</label>
+                    <select id="downloadsStatus">
+                        <option value="ok">Downloaded</option>
+                        <option value="failed">Failed</option>
+                        <option value="pruned">Removed by retention</option>
+                        <option value="all">All</option>
+                    </select>
+                </div>
+                <div class="filter-actions">
+                    <button type="submit" class="btn btn-primary btn-small"><i class="fas fa-filter"></i> Apply</button>
+                    <button type="button" id="downloadsReset" class="btn btn-secondary btn-small">Reset</button>
+                </div>
+            </form>
+
+            <div id="downloadsLoading" class="loading" hidden>
+                <i class="fas fa-spinner fa-spin"></i> Loading downloads...
+            </div>
+
+            <div class="downloads-table-wrap">
+                <table id="downloadsTable" class="downloads-table" hidden>
+                    <thead>
+                        <tr>
+                            <th class="col-play">Play</th>
+                            <th>Chat</th>
+                            <th>Sent</th>
+                            <th>From</th>
+                            <th class="col-num">Length</th>
+                            <th class="col-num">Size</th>
+                            <th class="col-save">Save</th>
+                        </tr>
+                    </thead>
+                    <tbody id="downloadsBody"></tbody>
+                </table>
+            </div>
+
+            <div id="noDownloads" class="no-data" hidden>
+                <i class="fas fa-file-audio"></i>
+                <h3>No downloads match</h3>
+                <p>Widen the filters, or turn on auto-download for a listener.</p>
+            </div>
+
+            <div id="downloadsPager" class="downloads-pager" hidden>
+                <button type="button" id="downloadsPrev" class="btn btn-secondary btn-small"><i class="fas fa-chevron-left"></i> Newer</button>
+                <span id="downloadsRange"></span>
+                <button type="button" id="downloadsNext" class="btn btn-secondary btn-small">Older <i class="fas fa-chevron-right"></i></button>
+            </div>
+        </section>
     </div>
 
     <!-- Modal for Add/Edit Webhook -->
@@ -52,23 +128,59 @@
                     <label for="webhookName">Name *</label>
                     <input type="text" id="webhookName" name="name" required>
                 </div>
-                
+
                 <div class="form-group">
-                    <label for="webhookURL">Webhook URL *</label>
-                    <input type="url" id="webhookURL" name="webhook_url" required>
+                    <label for="webhookURL" id="webhookURLLabel">Webhook URL *</label>
+                    <input type="url" id="webhookURL" name="webhook_url">
+                    <small class="field-hint" id="webhookURLHint" style="display: none;">
+                        Optional with auto-download on: leave it empty to only capture the media.
+                    </small>
                 </div>
-                
+
                 <div class="form-group">
                     <label for="secretToken">Secret Token</label>
                     <input type="text" id="secretToken" name="secret_token" placeholder="Optional security token">
                 </div>
-                
+
                 <div class="form-group checkbox-group">
                     <label>
                         <input type="checkbox" id="webhookEnabled" name="enabled" checked>
                         <span class="checkmark"></span>
                         Enable webhook
                     </label>
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="autoDownload" name="auto_download">
+                        <span class="checkmark"></span>
+                        Auto-download matched media
+                    </label>
+                    <small class="field-hint">
+                        Audio from matching messages is downloaded as it arrives, before the CDN link expires.
+                    </small>
+                </div>
+
+                <div class="form-group checkbox-group" id="voiceOnlyGroup" style="display: none;">
+                    <label>
+                        <input type="checkbox" id="autoDownloadVoiceOnly" name="auto_download_voice_only" checked>
+                        <span class="checkmark"></span>
+                        Voice notes only
+                    </label>
+                    <small class="field-hint">
+                        Off also captures forwarded music and attached audio files.
+                    </small>
+                </div>
+
+                <div class="form-group" id="retentionGroup" style="display: none;">
+                    <label for="retentionDays">Keep captured files for</label>
+                    <div class="inline-field">
+                        <input type="number" id="retentionDays" name="retention_days" min="0" max="3650" step="1" placeholder="forever">
+                        <span>days</span>
+                    </div>
+                    <small class="field-hint" id="retentionHint">
+                        Blank keeps them forever. A file another listener still wants is kept, and files you download by hand are never removed.
+                    </small>
                 </div>
 
                 <div class="form-group">
@@ -97,7 +209,7 @@
                         <i class="fas fa-plus"></i> Add Trigger
                     </button>
                 </div>
-                
+
                 <div class="modal-actions">
                     <button type="button" id="cancelBtn" class="btn btn-secondary">Cancel</button>
                     <button type="submit" class="btn btn-primary">
@@ -108,6 +220,17 @@
         </div>
     </div>
 
+    <!-- Datalist for Media Type Suggestions -->
+    <datalist id="mediaTypeOptions">
+        <option value="poll">Poll Creation</option>
+        <option value="poll_vote">Poll Vote</option>
+        <option value="image">Image</option>
+        <option value="video">Video</option>
+        <option value="audio">Audio</option>
+        <option value="document">Document</option>
+        <option value="sticker">Sticker</option>
+    </datalist>
+
     <!-- Webhook Card Template -->
     <template id="webhookCardTemplate">
         <div class="webhook-card">
@@ -115,6 +238,9 @@
                 <div class="webhook-info">
                     <h3 class="webhook-name"></h3>
                     <span class="webhook-status"></span>
+                    <span class="webhook-autodownload" style="display: none;">
+                        <i class="fas fa-download"></i> Auto-download
+                    </span>
                 </div>
                 <div class="webhook-actions">
                     <button class="btn-action btn-test" title="Test webhook">
@@ -219,6 +345,7 @@
         <button id="toastClose" class="toast-close">&times;</button>
     </div>
 
-    <script src="script.js"></script>
+    <script src="script.js?v=9"></script>
 </body>
+
 </html>

@@ -13,6 +13,8 @@ class WebhookManager {
         this.webhooks = [];
         this.currentEditingId = null;
         this.currentLogsWebhookId = null;
+        this.chatPickerSeq = 0;
+        this.downloads = { offset: 0, limit: 25, total: 0, loaded: false };
         this.init();
     }
 
@@ -39,6 +41,21 @@ class WebhookManager {
         }
         
         this.loadWebhooks();
+        this.loadRetentionMode();
+    }
+
+    // loadRetentionMode learns whether retention actually removes files, so the form can say
+    // so. Best effort: without it the hint just stays generic.
+    async loadRetentionMode() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/health`);
+            if (!response.ok) return;
+            const data = await response.json();
+            this.retention = data.retention || { enabled: false };
+            this.syncAutoDownloadFields();
+        } catch (error) {
+            this.retention = null;
+        }
     }
 
     setupEventListeners() {
@@ -55,11 +72,39 @@ class WebhookManager {
         // Form submission
         document.getElementById('webhookForm').addEventListener('submit', (e) => this.handleFormSubmit(e));
 
+        // Auto-download reveals the voice-only choice and waives the URL requirement
+        document.getElementById('autoDownload').addEventListener('change', () => this.syncAutoDownloadFields());
+
         // Add trigger button
         document.getElementById('addTriggerBtn').addEventListener('click', () => this.addTriggerRow());
 
         // Toast close
         document.getElementById('toastClose').addEventListener('click', () => this.hideToast());
+
+        // Views: listeners, and the media they captured
+        document.querySelectorAll('.view-tab').forEach(tab => {
+            tab.addEventListener('click', () => this.switchView(tab.dataset.view));
+        });
+
+        // Downloads filters and paging
+        document.getElementById('downloadsFilters').addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.downloads.offset = 0;
+            this.loadDownloads();
+        });
+        document.getElementById('downloadsReset').addEventListener('click', () => {
+            document.getElementById('downloadsFilters').reset();
+            this.downloads.offset = 0;
+            this.loadDownloads();
+        });
+        document.getElementById('downloadsPrev').addEventListener('click', () => {
+            this.downloads.offset = Math.max(0, this.downloads.offset - this.downloads.limit);
+            this.loadDownloads();
+        });
+        document.getElementById('downloadsNext').addEventListener('click', () => {
+            this.downloads.offset += this.downloads.limit;
+            this.loadDownloads();
+        });
 
         // Close modals when clicking outside
         window.addEventListener('click', (e) => {
@@ -143,7 +188,17 @@ class WebhookManager {
         
         // Fill in the data
         clone.querySelector('.webhook-name').textContent = webhook.name;
-        clone.querySelector('.webhook-url').textContent = webhook.webhook_url;
+        clone.querySelector('.webhook-url').textContent = webhook.webhook_url || '— (download-only listener)';
+
+        // Auto-download badge
+        const autoDownloadBadge = clone.querySelector('.webhook-autodownload');
+        if (webhook.auto_download) {
+            autoDownloadBadge.style.display = '';
+            autoDownloadBadge.title = (webhook.auto_download_voice_only === false
+                ? 'Downloads all audio from matching messages'
+                : 'Downloads voice notes from matching messages')
+                + (webhook.retention_days > 0 ? `, kept ${webhook.retention_days} days` : ', kept forever');
+        }
         clone.querySelector('.webhook-created').textContent = this.formatDate(webhook.created_at);
         
         // Status
@@ -219,6 +274,10 @@ class WebhookManager {
     resetForm() {
         document.getElementById('webhookForm').reset();
         document.getElementById('webhookEnabled').checked = true;
+        document.getElementById('autoDownload').checked = false;
+        document.getElementById('autoDownloadVoiceOnly').checked = true;
+        document.getElementById('retentionDays').value = '';
+        this.syncAutoDownloadFields();
         
         // Reset triggers to one default row
         const container = document.getElementById('triggersContainer');
@@ -245,11 +304,35 @@ class WebhookManager {
         this.setupTriggerRowListeners(container.querySelector('.trigger-item'));
     }
 
+    // syncAutoDownloadFields keeps the form honest about what auto-download changes: the
+    // voice-only choice only exists when it is on, and the URL stops being mandatory.
+    syncAutoDownloadFields() {
+        const on = document.getElementById('autoDownload').checked;
+        document.getElementById('voiceOnlyGroup').style.display = on ? '' : 'none';
+        document.getElementById('webhookURLLabel').textContent = on ? 'Webhook URL' : 'Webhook URL *';
+        document.getElementById('webhookURLHint').style.display = on ? '' : 'none';
+        document.getElementById('retentionGroup').style.display = on ? '' : 'none';
+
+        const hint = document.getElementById('retentionHint');
+        const base = 'Blank keeps them forever. A file another listener still wants is kept, and files you download by hand are never removed.';
+        if (this.retention && this.retention.enabled === false) {
+            hint.textContent = 'Retention is switched off on the bridge (RETENTION=off): nothing is removed.';
+        } else if (this.retention && this.retention.dry_run) {
+            hint.textContent = `${base} Dry run is on: the bridge only reports what it would remove.`;
+        } else {
+            hint.textContent = base;
+        }
+    }
+
     populateForm(webhook) {
         document.getElementById('webhookName').value = webhook.name;
-        document.getElementById('webhookURL').value = webhook.webhook_url;
+        document.getElementById('webhookURL').value = webhook.webhook_url || '';
         document.getElementById('secretToken').value = webhook.secret_token || '';
         document.getElementById('webhookEnabled').checked = webhook.enabled;
+        document.getElementById('autoDownload').checked = !!webhook.auto_download;
+        document.getElementById('autoDownloadVoiceOnly').checked = webhook.auto_download_voice_only !== false;
+        document.getElementById('retentionDays').value = webhook.retention_days > 0 ? String(webhook.retention_days) : '';
+        this.syncAutoDownloadFields();
         
         // Populate triggers
         const container = document.getElementById('triggersContainer');
@@ -316,14 +399,264 @@ class WebhookManager {
                 valueInput.disabled = true;
                 valueInput.value = '';
                 valueInput.placeholder = 'No value needed for "all messages"';
+                valueInput.removeAttribute('list');
+            } else if (typeSelect.value === 'media_type') {
+                valueInput.disabled = false;
+                valueInput.placeholder = 'Select or type media type (e.g., poll, image)';
+                valueInput.setAttribute('list', 'mediaTypeOptions');
+            } else if (typeSelect.value === 'chat_jid' || typeSelect.value === 'sender') {
+                valueInput.disabled = false;
+                // A sender trigger matches a person, so only 1:1 chats are offered; a group
+                // participant still has to be typed as a number.
+                const kind = typeSelect.value === 'sender' ? 'contact' : 'all';
+                valueInput.placeholder = kind === 'contact'
+                    ? 'Search a contact, or type a phone number'
+                    : 'Search a chat or group, or type a JID';
+                this.attachChatPicker(triggerRow, valueInput, kind);
             } else {
                 valueInput.disabled = false;
                 valueInput.placeholder = 'Trigger value';
+                valueInput.removeAttribute('list');
             }
         });
         
         // Trigger the change event to set initial state
         typeSelect.dispatchEvent(new Event('change'));
+    }
+
+    // attachChatPicker backs one trigger row's value field with a live list of chats.
+    // Free text still submits, which matters because a phone number is a valid value: the
+    // bridge expands it to the @lid chat the contact actually writes from.
+    attachChatPicker(triggerRow, valueInput, kind) {
+        let datalist = triggerRow.querySelector('datalist.chat-options');
+        if (!datalist) {
+            datalist = document.createElement('datalist');
+            datalist.className = 'chat-options';
+            datalist.id = `chatOptions${++this.chatPickerSeq}`;
+            triggerRow.appendChild(datalist);
+        }
+        valueInput.setAttribute('list', datalist.id);
+
+        if (valueInput.dataset.chatPickerKind === kind) {
+            return; // already wired for this kind; don't stack listeners
+        }
+        valueInput.dataset.chatPickerKind = kind;
+
+        const refresh = async () => {
+            const chats = await this.fetchChats(valueInput.value.trim(), valueInput.dataset.chatPickerKind);
+            this.renderChatOptions(datalist, chats);
+        };
+
+        if (!valueInput.dataset.chatPickerBound) {
+            valueInput.dataset.chatPickerBound = 'true';
+            let debounce = null;
+            valueInput.addEventListener('input', () => {
+                clearTimeout(debounce);
+                debounce = setTimeout(refresh, 250);
+            });
+        }
+
+        refresh();
+    }
+
+    async fetchChats(query, kind) {
+        const params = new URLSearchParams({ limit: '25' });
+        if (query) params.set('q', query);
+        if (kind && kind !== 'all') params.set('type', kind);
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chats?${params}`);
+            if (!response.ok) return [];
+            const data = await response.json();
+            return Array.isArray(data.data) ? data.data : [];
+        } catch (error) {
+            // A picker that cannot reach the bridge must not block typing a value by hand.
+            console.error('Failed to load chats:', error);
+            return [];
+        }
+    }
+
+    renderChatOptions(datalist, chats) {
+        datalist.innerHTML = '';
+        chats.forEach(chat => {
+            const option = document.createElement('option');
+            // The value is what lands in the trigger; the label is what the user reads. The
+            // bridge resolves real names and numbers, so a LID-only chat reads as
+            // "DUDI COHEN · 972527872233" rather than as its opaque ID.
+            option.value = chat.jid;
+            const name = chat.name && chat.name !== chat.jid.split('@')[0] ? chat.name : '';
+            const parts = [name || (chat.is_group ? 'Group' : 'Contact')];
+            if (chat.phone && chat.phone !== name) parts.push(chat.phone);
+            option.textContent = parts.join(' · ') + (chat.is_group ? ' (group)' : '');
+            datalist.appendChild(option);
+        });
+    }
+
+    // switchView shows one of the two top-level views. Downloads load on first visit only;
+    // after that the Apply button refreshes them, so switching back and forth is instant.
+    switchView(view) {
+        const showDownloads = view === 'downloads';
+        document.getElementById('webhooksView').hidden = showDownloads;
+        document.getElementById('downloadsView').hidden = !showDownloads;
+        document.querySelectorAll('.view-tab').forEach(tab => {
+            const active = tab.dataset.view === view;
+            tab.classList.toggle('active', active);
+            tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+
+        if (showDownloads && !this.downloads.loaded) {
+            this.downloads.loaded = true;
+            const chatInput = document.getElementById('downloadsChat');
+            this.attachChatPicker(chatInput.closest('.filter-field'), chatInput, 'all');
+            this.loadDownloads();
+        }
+    }
+
+    // downloadsQuery turns the filter form into API parameters. Dates are local days: the
+    // bridge compares instants, so "From 20 Sep" becomes local midnight on the 20th and "To
+    // 20 Sep" becomes local midnight on the 21st, making the To day inclusive. Sending bare
+    // dates would mean UTC midnight and shift a day's edges by the viewer's offset.
+    downloadsQuery() {
+        const params = new URLSearchParams({
+            limit: String(this.downloads.limit),
+            offset: String(this.downloads.offset),
+            status: document.getElementById('downloadsStatus').value,
+        });
+
+        const chat = document.getElementById('downloadsChat').value.trim();
+        if (chat) params.set('chat', chat);
+
+        const from = document.getElementById('downloadsFrom').value;
+        if (from) params.set('after', new Date(`${from}T00:00:00`).toISOString());
+
+        const to = document.getElementById('downloadsTo').value;
+        if (to) {
+            const end = new Date(`${to}T00:00:00`);
+            end.setDate(end.getDate() + 1);
+            params.set('before', end.toISOString());
+        }
+        return params;
+    }
+
+    async loadDownloads() {
+        const loading = document.getElementById('downloadsLoading');
+        loading.hidden = false;
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/downloads?${this.downloadsQuery()}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.message || data.error || `HTTP ${response.status}`);
+            }
+            this.downloads.total = data.total || 0;
+            this.renderDownloads(Array.isArray(data.data) ? data.data : []);
+        } catch (error) {
+            console.error('Failed to load downloads:', error);
+            this.showToast('Failed to load downloads: ' + error.message, 'error');
+            this.renderDownloads([]);
+        } finally {
+            loading.hidden = true;
+        }
+    }
+
+    renderDownloads(items) {
+        const body = document.getElementById('downloadsBody');
+        body.innerHTML = '';
+        items.forEach(item => body.appendChild(this.createDownloadRow(item)));
+
+        const hasItems = items.length > 0;
+        document.getElementById('downloadsTable').hidden = !hasItems;
+        document.getElementById('noDownloads').hidden = hasItems;
+
+        const { offset, limit, total } = this.downloads;
+        const pager = document.getElementById('downloadsPager');
+        pager.hidden = total <= limit;
+        document.getElementById('downloadsRange').textContent =
+            hasItems ? `${offset + 1}–${offset + items.length} of ${total}` : `0 of ${total}`;
+        document.getElementById('downloadsPrev').disabled = offset === 0;
+        document.getElementById('downloadsNext').disabled = offset + items.length >= total;
+    }
+
+    // createDownloadRow builds one row. Chat names, senders and errors come from other
+    // people's WhatsApp accounts, so every value is set with textContent — never innerHTML.
+    createDownloadRow(item) {
+        const row = document.createElement('tr');
+        row.dataset.messageId = item.message_id;
+        if (item.status !== 'ok' || item.file_missing) row.classList.add('download-unavailable');
+
+        const cell = (text, className) => {
+            const td = document.createElement('td');
+            if (className) td.className = className;
+            td.textContent = text;
+            row.appendChild(td);
+            return td;
+        };
+
+        // The UI builds media URLs from its own API base, not the bridge's download_url:
+        // that is PUBLIC_BASE_URL, the container's DNS name, which a browser cannot resolve.
+        const mediaUrl = item.media_path
+            ? `${this.apiBaseUrl}/media/${item.media_path.split('/').map(encodeURIComponent).join('/')}`
+            : '';
+
+        const play = cell('', 'col-play');
+        if (mediaUrl) {
+            const audio = document.createElement('audio');
+            audio.controls = true;
+            audio.preload = 'none';
+            audio.src = mediaUrl;
+            play.appendChild(audio);
+        } else {
+            play.textContent = item.file_missing ? 'File missing' : this.downloadStatusLabel(item.status);
+            if (item.error) play.title = item.error;
+        }
+
+        const chat = cell(item.chat_name || item.chat_jid);
+        chat.title = item.chat_jid;
+
+        cell(item.timestamp ? new Date(item.timestamp).toLocaleString() : '—');
+        cell(item.is_from_me ? 'Me' : (item.sender || '—'));
+        cell(this.formatDuration(item.seconds), 'col-num');
+        cell(item.size_bytes ? this.formatBytes(item.size_bytes) : '—', 'col-num');
+
+        const save = cell('', 'col-save');
+        if (mediaUrl) {
+            const link = document.createElement('a');
+            link.href = `${mediaUrl}?download=1`;
+            link.className = 'btn-action';
+            link.title = 'Save this file';
+            link.setAttribute('aria-label', 'Save this file');
+            const icon = document.createElement('i');
+            icon.className = 'fas fa-download';
+            link.appendChild(icon);
+            save.appendChild(link);
+        }
+
+        return row;
+    }
+
+    downloadStatusLabel(status) {
+        const labels = {
+            ok: 'Downloaded',
+            failed: 'Failed',
+            retry_timeout: 'Phone did not answer',
+            expired_not_on_phone: 'Expired',
+            rekeyed_on_phone: 'Unrecoverable',
+            incomplete_metadata: 'No key stored',
+            pruned: 'Removed by retention',
+        };
+        return labels[status] || status;
+    }
+
+    formatDuration(seconds) {
+        if (!seconds) return '—';
+        const m = Math.floor(seconds / 60);
+        const s = String(seconds % 60).padStart(2, '0');
+        return `${m}:${s}`;
+    }
+
+    formatBytes(bytes) {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     }
 
     async handleFormSubmit(e) {
@@ -335,6 +668,10 @@ class WebhookManager {
             webhook_url: formData.get('webhook_url')?.trim(),
             secret_token: formData.get('secret_token')?.trim() || '',
             enabled: document.getElementById('webhookEnabled').checked,
+            auto_download: document.getElementById('autoDownload').checked,
+            auto_download_voice_only: document.getElementById('autoDownloadVoiceOnly').checked,
+            // Blank means keep forever, sent as 0.
+            retention_days: parseInt(document.getElementById('retentionDays').value, 10) || 0,
             triggers: this.collectTriggers()
         };
         
@@ -344,16 +681,19 @@ class WebhookManager {
             return;
         }
         
-        if (!webhook.webhook_url) {
-            this.showToast('Webhook URL is required', 'error');
+        // A listener that only auto-downloads posts nowhere, so it needs no URL.
+        if (!webhook.webhook_url && !webhook.auto_download) {
+            this.showToast('Webhook URL is required unless auto-download is enabled', 'error');
             return;
         }
         
-        try {
-            new URL(webhook.webhook_url);
-        } catch (error) {
-            this.showToast('Please enter a valid webhook URL', 'error');
-            return;
+        if (webhook.webhook_url) {
+            try {
+                new URL(webhook.webhook_url);
+            } catch (error) {
+                this.showToast('Please enter a valid webhook URL', 'error');
+                return;
+            }
         }
         
         if (webhook.triggers.length === 0) {
@@ -616,9 +956,17 @@ class WebhookManager {
         const template = document.getElementById('logEntryTemplate');
         const clone = template.content.cloneNode(true);
         
-        // Determine status based on response_status or delivered_at
+        // An auto-download capture is an action of the same listener, not an HTTP delivery:
+        // it has no status code, and delivered_at carries whether the file landed.
+        const isCapture = log.event_type === 'auto_download';
+        const isRemoval = log.event_type === 'retention';
+
         let status = 'pending';
-        if (log.response_status) {
+        if (isRemoval) {
+            status = 'success';
+        } else if (isCapture) {
+            status = log.delivered_at ? 'success' : 'error';
+        } else if (log.response_status) {
             status = log.response_status >= 200 && log.response_status < 300 ? 'success' : 'error';
         } else if (log.delivered_at) {
             status = 'success';
@@ -630,7 +978,13 @@ class WebhookManager {
         
         // Fill in the data
         const statusBadge = clone.querySelector('.status-badge');
-        statusBadge.textContent = status.toUpperCase();
+        if (isRemoval) {
+            statusBadge.textContent = 'REMOVED';
+        } else if (isCapture) {
+            statusBadge.textContent = status === 'success' ? 'CAPTURED' : 'CAPTURE FAILED';
+        } else {
+            statusBadge.textContent = status.toUpperCase();
+        }
         statusBadge.classList.add(status);
         
         clone.querySelector('.log-timestamp').textContent = this.formatDate(log.created_at);
@@ -659,7 +1013,26 @@ class WebhookManager {
         
         // Response information
         let responseText = 'N/A';
-        if (log.response_status) {
+        if (isRemoval) {
+            let days = null;
+            try {
+                days = JSON.parse(log.payload || '{}').retention_days;
+            } catch (e) {
+                days = null;
+            }
+            responseText = `${log.response_body || 'file'} removed${days ? ` after ${days} days` : ''}`;
+        } else if (isCapture) {
+            responseText = log.response_body || 'N/A';
+            let durationMs = null;
+            try {
+                durationMs = JSON.parse(log.payload || '{}').duration_ms;
+            } catch (e) {
+                durationMs = null;
+            }
+            if (durationMs !== null && durationMs !== undefined) {
+                responseText += ` (${durationMs}ms)`;
+            }
+        } else if (log.response_status) {
             responseText = `HTTP ${log.response_status}`;
             if (log.response_body) {
                 try {
@@ -678,12 +1051,14 @@ class WebhookManager {
         }
         clone.querySelector('.log-response').textContent = responseText;
         
-        // Processing time from payload metadata
+        // Processing time: a delivery records it under metadata, a capture as duration_ms.
         let processingTime = 0;
         try {
             if (log.payload) {
                 const payload = JSON.parse(log.payload);
-                processingTime = payload.metadata?.processing_time_ms || 0;
+                processingTime = isCapture
+                    ? (payload.duration_ms || 0)
+                    : (payload.metadata?.processing_time_ms || 0);
             }
         } catch (e) {
             // If parsing fails, use 0

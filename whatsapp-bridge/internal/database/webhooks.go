@@ -2,15 +2,18 @@ package database
 
 import (
 	"fmt"
+	"time"
+
 	"whatsapp-bridge/internal/types"
 )
 
 // StoreWebhookConfig stores a webhook configuration in the database
 func (store *MessageStore) StoreWebhookConfig(config *types.WebhookConfig) error {
 	result, err := store.db.Exec(
-		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled) 
-		 VALUES (?, ?, ?, ?)`,
+		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled, auto_download, auto_download_voice_only, retention_days)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
+		config.AutoDownload, config.VoiceOnly(), config.RetentionDays,
 	)
 	if err != nil {
 		return err
@@ -37,15 +40,19 @@ func (store *MessageStore) StoreWebhookConfig(config *types.WebhookConfig) error
 // GetWebhookConfig retrieves a webhook configuration by ID
 func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error) {
 	config := &types.WebhookConfig{}
+	var voiceOnly bool
 	err := store.db.QueryRow(
-		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at 
+		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
+		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0)
 		 FROM webhook_configs WHERE id = ?`, id,
 	).Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
-		&config.Enabled, &config.CreatedAt, &config.UpdatedAt)
+		&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
+		&config.AutoDownload, &voiceOnly, &config.RetentionDays)
 
 	if err != nil {
 		return nil, err
 	}
+	config.AutoDownloadVoiceOnly = &voiceOnly
 
 	// Load triggers
 	config.Triggers, err = store.GetWebhookTriggers(id)
@@ -59,29 +66,34 @@ func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error
 // GetAllWebhookConfigs retrieves all webhook configurations
 func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error) {
 	rows, err := store.db.Query(
-		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at 
+		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
+		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0)
 		 FROM webhook_configs ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var configs []*types.WebhookConfig
 	for rows.Next() {
 		config := &types.WebhookConfig{}
+		var voiceOnly bool
 		err := rows.Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
-			&config.Enabled, &config.CreatedAt, &config.UpdatedAt)
+			&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
+			&config.AutoDownload, &voiceOnly, &config.RetentionDays)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
+		config.AutoDownloadVoiceOnly = &voiceOnly
+		configs = append(configs, config)
+	}
+	rows.Close()
 
-		// Load triggers for each config
+	// Load triggers for each config after closing rows to avoid single-connection pool deadlock
+	for _, config := range configs {
 		config.Triggers, err = store.GetWebhookTriggers(config.ID)
 		if err != nil {
 			return nil, err
 		}
-
-		configs = append(configs, config)
 	}
 
 	return configs, nil
@@ -100,9 +112,11 @@ func (store *MessageStore) UpdateWebhookConfig(config *types.WebhookConfig) erro
 
 	// Update the main webhook configuration
 	result, err := tx.Exec(
-		`UPDATE webhook_configs SET name = ?, webhook_url = ?, secret_token = ?, 
-		 enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		config.Name, config.WebhookURL, config.SecretToken, config.Enabled, config.ID,
+		`UPDATE webhook_configs SET name = ?, webhook_url = ?, secret_token = ?,
+		 enabled = ?, auto_download = ?, auto_download_voice_only = ?, retention_days = ?,
+		 updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
+		config.AutoDownload, config.VoiceOnly(), config.RetentionDays, config.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update webhook config: %v", err)
@@ -236,10 +250,11 @@ func (store *MessageStore) DeleteWebhookTrigger(id int) error {
 func (store *MessageStore) StoreWebhookLog(log *types.WebhookLog) error {
 	_, err := store.db.Exec(
 		`INSERT INTO webhook_logs (webhook_config_id, message_id, chat_jid, trigger_type, trigger_value, 
-		 payload, response_status, response_body, attempt_count, delivered_at) 
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 payload, response_status, response_body, attempt_count, delivered_at, event_type) 
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.WebhookConfigID, log.MessageID, log.ChatJID, log.TriggerType, log.TriggerValue,
 		log.Payload, log.ResponseStatus, log.ResponseBody, log.AttemptCount, log.DeliveredAt,
+		eventTypeOrDefault(log.EventType),
 	)
 	return err
 }
@@ -247,7 +262,8 @@ func (store *MessageStore) StoreWebhookLog(log *types.WebhookLog) error {
 // GetWebhookLogs retrieves webhook logs with optional filtering
 func (store *MessageStore) GetWebhookLogs(webhookConfigID int, limit int) ([]*types.WebhookLog, error) {
 	query := `SELECT id, webhook_config_id, message_id, chat_jid, trigger_type, trigger_value, 
-		 payload, response_status, response_body, attempt_count, delivered_at, created_at 
+		 payload, response_status, response_body, attempt_count, delivered_at, created_at,
+		 COALESCE(event_type, 'delivery') 
 		 FROM webhook_logs`
 
 	var args []interface{}
@@ -273,7 +289,8 @@ func (store *MessageStore) GetWebhookLogs(webhookConfigID int, limit int) ([]*ty
 		log := &types.WebhookLog{}
 		err := rows.Scan(&log.ID, &log.WebhookConfigID, &log.MessageID, &log.ChatJID,
 			&log.TriggerType, &log.TriggerValue, &log.Payload, &log.ResponseStatus,
-			&log.ResponseBody, &log.AttemptCount, &log.DeliveredAt, &log.CreatedAt)
+			&log.ResponseBody, &log.AttemptCount, &log.DeliveredAt, &log.CreatedAt,
+			&log.EventType)
 		if err != nil {
 			return nil, err
 		}
@@ -281,4 +298,47 @@ func (store *MessageStore) GetWebhookLogs(webhookConfigID int, limit int) ([]*ty
 	}
 
 	return logs, nil
+}
+
+// eventTypeOrDefault keeps older callers, which never set EventType, writing delivery rows.
+func eventTypeOrDefault(eventType string) string {
+	if eventType == "" {
+		return "delivery"
+	}
+	return eventType
+}
+
+// CaptureRecord is one successful auto-download, as logged against the listener that made
+// it. Retention decides from these: they are the only record of *which* listener wanted a
+// file. A file with none — fetched by hand through /api/download or a batch — is never
+// retention's to remove.
+type CaptureRecord struct {
+	RuleID     int
+	MessageID  string
+	ChatJID    string
+	CapturedAt time.Time
+}
+
+// ListCaptures returns every successful capture in webhook_logs. A cached re-capture logs
+// another row, so one file can appear more than once; retention judges every row, which
+// makes the latest capture the one that governs.
+func (store *MessageStore) ListCaptures() ([]CaptureRecord, error) {
+	rows, err := store.db.Query(`SELECT webhook_config_id, message_id, chat_jid, created_at
+		FROM webhook_logs
+		WHERE event_type = 'auto_download' AND delivered_at IS NOT NULL
+		  AND message_id IS NOT NULL AND message_id <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var captures []CaptureRecord
+	for rows.Next() {
+		var c CaptureRecord
+		if err := rows.Scan(&c.RuleID, &c.MessageID, &c.ChatJID, &c.CapturedAt); err != nil {
+			return nil, err
+		}
+		captures = append(captures, c)
+	}
+	return captures, rows.Err()
 }

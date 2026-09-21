@@ -1,5 +1,13 @@
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 claude_desktop_config.json
 whatsapp.log
 whatsapp-bridge/whatsapp-bridge
+store-test/
+store/backups/
+store/media/
+
+# UI test dependencies (installed in a container by scripts/test-ui.sh)
+node_modules/

@@ -14,7 +14,32 @@ services:
       - ./store:/app/whatsapp-bridge/store  # Persistent storage for WhatsApp data
     environment:
       - TZ=UTC
+      # Base URL used in download_url and webhook media_download_url. The container DNS
+      # name is what the MCP server and other services on whatsapp_internal can reach;
+      # localhost would only have worked inside the bridge container itself.
+      - PUBLIC_BASE_URL=http://whatsapp-mcp-whatsapp-bridge-1:8080
+      # Auto-download pool. Which chats are captured is not set here: a listener is a
+      # webhook config with auto_download on, managed in the UI. AUTO_DOWNLOAD=off is a
+      # kill switch for the pool that leaves every rule untouched.
+      - AUTO_DOWNLOAD=on
+      - AUTO_DOWNLOAD_WORKERS=2
+      # Retention removes a listener's captured files after its "Keep for N days". Every
+      # listener keeps forever until you set that. Dry run reports what it would remove —
+      # see GET /api/retention/preview and the bridge log — and deletes nothing. Only an
+      # explicit false turns it off; a typo keeps dry run on.
+      - RETENTION=on
+      - RETENTION_DRY_RUN=true
     restart: unless-stopped
+    # Shutdown drains the auto-download queue and closes the databases after whatsmeow
+    # disconnects; the default 10s can cut that short (AUDIO_DOWNLOAD_PLAN.md §4.5).
+    stop_grace_period: 30s
+    healthcheck:
+      # Probes the bridge HTTP port; a non-responsive process gets marked unhealthy
+      test: ["CMD", "curl", "-f", "-s", "-X", "OPTIONS", "http://localhost:8080/api/send"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - whatsapp_internal
 

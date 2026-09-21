@@ -20,16 +20,25 @@ func (wm *Manager) ValidateWebhookConfig(config *types.WebhookConfig) error {
 		return fmt.Errorf("webhook name must be less than 256 characters")
 	}
 
-	if config.WebhookURL == "" {
-		return fmt.Errorf("webhook URL is required")
+	// A config with auto-download on is a valid listener without a URL: it captures the
+	// matched media and delivers nothing. Any other config still needs somewhere to post.
+	if config.WebhookURL == "" && !config.AutoDownload {
+		return fmt.Errorf("webhook URL is required unless auto-download is enabled")
 	}
 
-	if len(config.WebhookURL) > 2048 {
-		return fmt.Errorf("webhook URL must be less than 2048 characters")
+	if config.WebhookURL != "" {
+		if len(config.WebhookURL) > 2048 {
+			return fmt.Errorf("webhook URL must be less than 2048 characters")
+		}
+
+		if !strings.HasPrefix(config.WebhookURL, "http://") && !strings.HasPrefix(config.WebhookURL, "https://") {
+			return fmt.Errorf("webhook URL must start with http:// or https://")
+		}
 	}
 
-	if !strings.HasPrefix(config.WebhookURL, "http://") && !strings.HasPrefix(config.WebhookURL, "https://") {
-		return fmt.Errorf("webhook URL must start with http:// or https://")
+	// Ten years is a generous ceiling; the point is to catch a typo, not to limit anyone.
+	if config.RetentionDays < 0 || config.RetentionDays > 3650 {
+		return fmt.Errorf("retention_days must be between 0 (keep forever) and 3650")
 	}
 
 	// Validate triggers
@@ -76,6 +85,10 @@ func (wm *Manager) ValidateWebhookConfig(config *types.WebhookConfig) error {
 
 // TestWebhook sends a test webhook to verify connectivity
 func (wm *Manager) TestWebhook(config *types.WebhookConfig) error {
+	if config.WebhookURL == "" {
+		return fmt.Errorf("webhook %q has no URL to test: it is a download-only listener", config.Name)
+	}
+
 	testPayload := types.WebhookPayload{
 		EventType: "test",
 		Timestamp: time.Now().Format(time.RFC3339),

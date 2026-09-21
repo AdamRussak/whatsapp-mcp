@@ -125,3 +125,96 @@ func TestUpdateWebhookConfig(t *testing.T) {
 
 	t.Log("✓ Webhook update test passed successfully")
 }
+
+// TestWebhookConfigAutoDownloadRoundTrip covers the schema-v2 fields through the three
+// paths the API uses: create, read back, and update.
+func TestWebhookConfigAutoDownloadRoundTrip(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	voiceOnly := false
+	config := &types.WebhookConfig{
+		Name:                  "Capture a contact's voice notes",
+		WebhookURL:            "", // download-only listener
+		Enabled:               true,
+		AutoDownload:          true,
+		AutoDownloadVoiceOnly: &voiceOnly,
+		Triggers: []types.WebhookTrigger{
+			{TriggerType: "sender", TriggerValue: "972523996302", MatchType: "exact", Enabled: true},
+		},
+	}
+	if err := store.StoreWebhookConfig(config); err != nil {
+		t.Fatalf("StoreWebhookConfig: %v", err)
+	}
+
+	got, err := store.GetWebhookConfig(config.ID)
+	if err != nil {
+		t.Fatalf("GetWebhookConfig: %v", err)
+	}
+	if !got.AutoDownload {
+		t.Error("auto_download did not survive the round trip")
+	}
+	if got.VoiceOnly() {
+		t.Error("auto_download_voice_only=false did not survive the round trip")
+	}
+	if got.WebhookURL != "" {
+		t.Errorf("webhook_url = %q, want empty", got.WebhookURL)
+	}
+
+	// The same values must come back from the list the manager loads.
+	all, err := store.GetAllWebhookConfigs()
+	if err != nil {
+		t.Fatalf("GetAllWebhookConfigs: %v", err)
+	}
+	if len(all) != 1 || !all[0].AutoDownload || all[0].VoiceOnly() {
+		t.Fatalf("GetAllWebhookConfigs returned %+v", all)
+	}
+
+	// Turning capture off through an update.
+	got.AutoDownload = false
+	got.WebhookURL = "https://example.com/hook"
+	if err := store.UpdateWebhookConfig(got); err != nil {
+		t.Fatalf("UpdateWebhookConfig: %v", err)
+	}
+	after, err := store.GetWebhookConfig(config.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.AutoDownload {
+		t.Error("auto_download stayed on after being updated off")
+	}
+}
+
+// A client that omits auto_download_voice_only must get the column default (voice notes
+// only), never "all audio".
+func TestWebhookConfigVoiceOnlyDefaultsToTrue(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	config := &types.WebhookConfig{
+		Name:         "no voice_only field sent",
+		Enabled:      true,
+		AutoDownload: true,
+		Triggers:     []types.WebhookTrigger{{TriggerType: "all", MatchType: "exact", Enabled: true}},
+	}
+	if config.AutoDownloadVoiceOnly != nil {
+		t.Fatal("fixture should leave the field unset")
+	}
+	if err := store.StoreWebhookConfig(config); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.GetWebhookConfig(config.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.VoiceOnly() {
+		t.Fatal("an unset auto_download_voice_only was stored as false; it must default to true")
+	}
+}

@@ -1,0 +1,11 @@
+{
+  "name": "whatsapp-webhook-ui-tests",
+  "private": true,
+  "description": "jsdom tests for the webhook UI. Run through scripts/test-ui.sh, which uses a node container.",
+  "scripts": {
+    "test": "TZ=Asia/Jerusalem node --test"
+  },
+  "devDependencies": {
+    "jsdom": "25.0.1"
+  }
+}
