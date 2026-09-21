@@ -224,13 +224,18 @@ Schema v1 is live. Checklist §4.6:
 | API | `POST /api/download` on a cached item → 200. `media_type: "voice"` → job with `total: 0` (correct: only messages received from now on carry `is_ptt`). `media_type: "audio"` → normal. `media_type: "bogus"` → **400** with a clear message. |
 | B10 fixed | `download_url` is now `http://whatsapp-mcp-whatsapp-bridge-1:8080/api/media/...`, and the MCP container fetched it: **200, 3,968 bytes, `OggS`**. Previously it read `localhost:8080`, which only resolved inside the bridge container. |
 
-> [!NOTE]
-> **Outstanding live check:** no message arrived in the first minutes after the deploy (quiet early morning), so a newly received voice note has not yet been observed landing with `is_ptt = 1`. The store path itself logged zero failures. Confirm with:
-> ```bash
-> sudo sqlite3 "file:store/messages.db?mode=ro" \
->   "SELECT id, filename, mimetype, seconds, is_ptt FROM messages WHERE is_ptt IS NOT NULL ORDER BY timestamp DESC LIMIT 5;"
-> ```
-> Expect `is_ptt = 1` and a `voice_<msgID>.ogg` filename for a voice note, `0` and `audio_<msgID>.ogg` for an attached audio file.
+**Confirmed live (2026-09-21, 10:20–10:34 UTC).** 166 messages stored since the deploy, 3 of them audio, all 3 tagged correctly — in both directions:
+
+| id | chat | from | seconds | is_ptt | direct_path |
+|---|---|---|---|---|---|
+| `AC01F868…` | `62156783493249@lid` | me | 5 | 1 | captured |
+| `3A7A9BB6…` | `62156783493249@lid` | them | 6 | 1 | captured |
+| `3AE9AF69…` | `62156783493249@lid` | them | 3 | 1 | captured |
+
+Filenames are `voice_<msgID>.ogg`, mimetype `audio/ogg; codecs=opus`, and no row was tagged `is_ptt = 0` (no audio file attachments arrived). The whole chain then worked end to end: a batch with `media_type: "voice"` on that chat found exactly those 3, downloaded **3/3 directly with no media retry**, and wrote three valid `OggS` files to `store/media/972547669192/`. `media.db` `ok` 111 → 114.
+
+> [!TIP]
+> **Follow-up this enables.** `direct_path` is now stored for new audio, but `DownloadMedia` still re-derives it from `url` with `ExtractDirectPathFromURL` — the function that was silently wrong until S2. New rows could use the stored column directly and fall back to derivation only for older rows. Small, and it removes a parsing step from the download path.
 
 ---
 
