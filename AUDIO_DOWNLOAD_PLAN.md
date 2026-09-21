@@ -388,7 +388,7 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 | G-a | **Auto-download captures audio only** | The gate is hard-limited to `media_type == "audio"`; images, video and documents are never queued even with a matching trigger. Deliberate (goal G2 is about voice), but it is the first thing a user asks for after seeing an image arrive. A contained change if wanted. |
 | G-b | **The exclusion path is unit-tested, not live-proven** | Every live message since deploy that reached a rule was audio, so "a non-matching message is correctly skipped" has never been demonstrated on real traffic. |
 | G-c | **No chat picker in the UI** | A rule still means typing a phone number or pasting a group JID. B11 made phone numbers work; it did not make them discoverable. Planned as §6 Phase 7.1. |
-| G-d | **The UI has no lint or tests** | There is no JS toolchain in this environment; `script.js` changes are read-checked and then exercised by hand. Planned as §6 Phase 7.4 (jsdom in a container, plus a deploy smoke check). |
+| G-d ✅ | **The UI had no tests** | Closed by §6 Phase 7.4: 21 jsdom tests in a `node:22` container, mutation-checked. |
 | G-e | **Rollback was verified by query, not by drill** | The pre-phase4 binary's exact `SELECT`/`INSERT` were run against a v3 copy and work. The old image was never actually booted against a migrated database (§4.6 step 9 remains partly owed). |
 
 **Later phases, unchanged in scope:** Phase 2 (MCP fallback download, `list_messages(media_type)`, MP3 conversion), Phase 3 (MCP tools and a Gradio tab), Phase 5 (batch by sender; the history request is explicitly low-payoff because of B1), Phase 6 (transcription). Plus the §5.2 parity fix: `batch_download_chat_audio` still exposes only `chat`, `limit`, `skip_cached`, `retry_failed`.
@@ -549,6 +549,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 | 4 | rehearse on `store-test` | `migration vN applied`, exit 0 |
 | 5 | on the copy: `PRAGMA quick_check` + step-3 queries | `ok`, identical |
 | 6 | spot-check 5 old rows before/after | byte-identical |
+| 6b | UI changes only: `./scripts/test-ui.sh` | `# fail 0` |
 | 7 | `docker compose up -d --build --force-recreate` — **always `--force-recreate`**, never plain `--build`. This has now bitten twice (§2.10, §2.15): a stopped or unchanged container is *started*, not replaced, so the freshly built image never runs | healthy, **and the log prints the expected schema version** — that is the proof, not "Built" or "Up/healthy" |
 | 8 | steps 5–6 on live DB (read-only) | same |
 | 8b | `./scripts/smoke.sh` (set `EXPECT_SCHEMA` to the version this deploy lands on) | `0 failed`; this is what proves the new binary and the new UI are the ones actually running |
@@ -839,7 +840,7 @@ type Downloader interface {
 
 `transcribe_voice_message(message_id, chat_jid, language)` MCP tool with `faster-whisper` or an API backend; cache in a `transcripts` table; add `transcript` to `list_messages`; optional `transcribe: true` on auto-download rules.
 
-### Phase 7 — Listener ergonomics, retention and a downloads view 🟡 (7.1–7.3 ✅, 7.4–7.5 ❌)
+### Phase 7 — Listener ergonomics, retention and a downloads view 🟡 (7.1–7.4 ✅, 7.5 ❌)
 
 Four items from §2.16, in the order they should land. The sequence is deliberate: the chat
 picker unblocks two UIs, the health endpoint and smoke check make every later deploy
@@ -951,7 +952,7 @@ Decisions worth keeping:
 Known limitation: chat names inherit B12, so 100 conversations display under the user's own
 LID.
 
-#### 7.4 UI tests
+#### 7.4 UI tests ✅ (2026-09-21)
 
 Two layers, because they catch different things.
 
@@ -969,6 +970,37 @@ Two layers, because they catch different things.
   renders `HTTP 200`; ticking auto-download reveals voice-only and waives the URL
   requirement; the submitted payload carries the new fields; a card shows the badge and the
   download-only URL placeholder; the chat picker fills the trigger value.
+
+**Shipped: 21 tests**, `scripts/test-ui.sh`, green. Beyond the planned cases they cover the
+Downloads view (browser-reachable URLs, not `download_url`; hostile chat names rendered as
+text; missing and failed files not offered for playback; local-day date filtering under
+`TZ=Asia/Jerusalem`; paging) and the chat picker (`Name · number` labels, contact-only
+lookups for senders, a debounced search, free text still accepted when the bridge fails).
+
+**Mutation-checked, 5/5 caught**, each reintroducing a real mistake: a chat name through
+`innerHTML`; bare UTC dates; the player on `download_url`; the picker dropping the number;
+and the auto-download checkbox missing from the HTML — the stale-container shape, which
+fails all 21 at once because the page cannot even wire itself up.
+
+**It found a live bug on its first run:** every capture row in the Logs view read
+"Processing Time: 0ms", because captures record `duration_ms` rather than
+`metadata.processing_time_ms`. Written as the expected behaviour, seen failing, then fixed.
+
+Two things learned the hard way:
+- **`window.eval` gives a top-level `class` its own scope**, so a second eval cannot see
+  `WebhookManager`. A browser's classic `<script>` shares it across scripts. The harness now
+  runs `script.js` as a real `<script>` element — the fix and the more faithful model.
+- **A 200 from this nginx proves nothing.** `try_files … /index.html` answers every unknown
+  path with `index.html` and a 200, including `/test/package.json`. Checking that the test
+  harness is not served therefore asserts on the body; that check is now in `smoke.sh`.
+
+**`.dockerignore` added** (it did not exist). `Dockerfile.ui` copies `whatsapp-webhook-ui/`
+into nginx's web root, so without it the tests and their `node_modules` would have been
+public. It also stops every build from shipping `store/` — **3.1 GB of databases and
+backups, the WhatsApp session included** — to the Docker daemon: build context fell from
+~3.3 GB to 60 KB (UI) and 416 KB (bridge). No image copied `store/`, so nothing leaked into
+an image; a stray `whatsapp-bridge/store/whatsapp.db` from local testing holds no paired
+device and is discarded with the bridge's builder stage.
 
 #### 7.5 Per-listener retention (schema v4) — destructive, lands last
 

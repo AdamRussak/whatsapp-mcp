@@ -1,0 +1,19 @@
+# Every image here builds from the repository root, so everything below is kept out of
+# every build context. None of the Dockerfiles copies any of it.
+
+# Runtime data. store/ is gigabytes of databases and backups — including the WhatsApp
+# session — and was being sent to the Docker daemon on every build.
+store/
+store-test/
+**/store/
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+
+.git/
+**/node_modules/
+
+# The UI test harness. Dockerfile.ui copies whatsapp-webhook-ui/ into nginx's web root, so
+# without this line the tests and their package.json would be served to anyone.
+whatsapp-webhook-ui/test/

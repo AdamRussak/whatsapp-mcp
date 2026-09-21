@@ -136,5 +136,15 @@ else
   bad "index.html returned $STATUS"
 fi
 
+# The UI test harness must never be served. Check the body, not the status: nginx's SPA
+# fallback (try_files … /index.html) answers any unknown path with index.html and a 200,
+# so a status code cannot tell "not served" from "served".
+get "$UI/test/package.json"
+if [[ "$BODY" == *whatsapp-webhook-ui-tests* ]]; then
+  bad "the UI test harness is being served — check .dockerignore"
+else
+  ok "the UI test harness is not served"
+fi
+
 note "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

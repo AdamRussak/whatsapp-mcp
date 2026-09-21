@@ -426,6 +426,12 @@ go test ./...
 go test ./... -race        # the auto-download pool is concurrent
 go vet ./...
 
+# Run the webhook UI tests (jsdom, in a node:22 container — no Node needed on the host)
+./scripts/test-ui.sh
+
+# After every deploy: check the RUNNING system, not the build output
+./scripts/smoke.sh               # set EXPECT_SCHEMA when a migration ships
+
 # Run MCP server tests
 cd whatsapp-mcp-server
 uv run pytest

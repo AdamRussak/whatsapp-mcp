@@ -8,3 +8,6 @@ whatsapp-bridge/whatsapp-bridge
 store-test/
 store/backups/
 store/media/
+
+# UI test dependencies (installed in a container by scripts/test-ui.sh)
+node_modules/

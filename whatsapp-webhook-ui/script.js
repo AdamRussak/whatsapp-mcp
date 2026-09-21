@@ -1006,12 +1006,14 @@ class WebhookManager {
         }
         clone.querySelector('.log-response').textContent = responseText;
         
-        // Processing time from payload metadata
+        // Processing time: a delivery records it under metadata, a capture as duration_ms.
         let processingTime = 0;
         try {
             if (log.payload) {
                 const payload = JSON.parse(log.payload);
-                processingTime = payload.metadata?.processing_time_ms || 0;
+                processingTime = isCapture
+                    ? (payload.duration_ms || 0)
+                    : (payload.metadata?.processing_time_ms || 0);
             }
         } catch (e) {
             // If parsing fails, use 0
