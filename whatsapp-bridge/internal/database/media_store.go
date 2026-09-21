@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -322,4 +323,58 @@ func (s *MediaStore) GetActiveJob() (*DownloadJob, error) {
 	}
 
 	return &job, nil
+}
+
+// ListDownloadRecords returns every download record for the given chats (all chats when
+// chatJIDs is empty) with the given status ("" matches any status).
+//
+// It is deliberately unpaged. media.db only knows when a file was *downloaded*; a user
+// filtering by date means when the message was *sent*, which lives in messages.db. So the
+// caller joins that metadata, filters by message time and pages in Go. At this archive's
+// scale (a few thousand records) that is a single cheap scan; revisit if media.db grows
+// by orders of magnitude.
+func (s *MediaStore) ListDownloadRecords(chatJIDs []string, status string) ([]MediaDownloadRecord, error) {
+	query := `SELECT message_id, chat_jid, local_path, sha256, direct_path, downloaded_at, status, error
+		FROM media_downloads WHERE 1 = 1`
+	var args []interface{}
+
+	if len(chatJIDs) > 0 {
+		placeholders := make([]string, len(chatJIDs))
+		for i, jid := range chatJIDs {
+			placeholders[i] = "?"
+			args = append(args, jid)
+		}
+		query += " AND chat_jid IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	if status != "" {
+		query += " AND status = ?"
+		args = append(args, status)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []MediaDownloadRecord
+	for rows.Next() {
+		var rec MediaDownloadRecord
+		var downloadedAt sql.NullTime
+		var localPath, sha256, directPath, errStr sql.NullString
+		if err := rows.Scan(&rec.MessageID, &rec.ChatJID, &localPath, &sha256, &directPath,
+			&downloadedAt, &rec.Status, &errStr); err != nil {
+			return nil, err
+		}
+		rec.LocalPath = localPath.String
+		rec.SHA256 = sha256.String
+		rec.DirectPath = directPath.String
+		rec.Error = errStr.String
+		if downloadedAt.Valid {
+			t := downloadedAt.Time
+			rec.DownloadedAt = &t
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
 }

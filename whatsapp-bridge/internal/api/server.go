@@ -85,6 +85,7 @@ func (s *Server) registerHandlers() {
 	http.HandleFunc("/api/download/batch", CorsMiddleware(s.handleDownloadBatch))
 	http.HandleFunc("/api/download/batch/", CorsMiddleware(s.handleBatchJobByID))
 	http.HandleFunc("/api/media/", CorsMiddleware(s.handleServeMedia))
+	http.HandleFunc("/api/downloads", CorsMiddleware(s.handleDownloads))
 
 	// Health, for deploy checks and monitoring
 	http.HandleFunc("/api/health", CorsMiddleware(s.handleHealth))

@@ -14,6 +14,7 @@ class WebhookManager {
         this.currentEditingId = null;
         this.currentLogsWebhookId = null;
         this.chatPickerSeq = 0;
+        this.downloads = { offset: 0, limit: 25, total: 0, loaded: false };
         this.init();
     }
 
@@ -64,6 +65,31 @@ class WebhookManager {
 
         // Toast close
         document.getElementById('toastClose').addEventListener('click', () => this.hideToast());
+
+        // Views: listeners, and the media they captured
+        document.querySelectorAll('.view-tab').forEach(tab => {
+            tab.addEventListener('click', () => this.switchView(tab.dataset.view));
+        });
+
+        // Downloads filters and paging
+        document.getElementById('downloadsFilters').addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.downloads.offset = 0;
+            this.loadDownloads();
+        });
+        document.getElementById('downloadsReset').addEventListener('click', () => {
+            document.getElementById('downloadsFilters').reset();
+            this.downloads.offset = 0;
+            this.loadDownloads();
+        });
+        document.getElementById('downloadsPrev').addEventListener('click', () => {
+            this.downloads.offset = Math.max(0, this.downloads.offset - this.downloads.limit);
+            this.loadDownloads();
+        });
+        document.getElementById('downloadsNext').addEventListener('click', () => {
+            this.downloads.offset += this.downloads.limit;
+            this.loadDownloads();
+        });
 
         // Close modals when clicking outside
         window.addEventListener('click', (e) => {
@@ -433,6 +459,172 @@ class WebhookManager {
                 : (chat.is_group ? 'Group' : 'Contact');
             datalist.appendChild(option);
         });
+    }
+
+    // switchView shows one of the two top-level views. Downloads load on first visit only;
+    // after that the Apply button refreshes them, so switching back and forth is instant.
+    switchView(view) {
+        const showDownloads = view === 'downloads';
+        document.getElementById('webhooksView').hidden = showDownloads;
+        document.getElementById('downloadsView').hidden = !showDownloads;
+        document.querySelectorAll('.view-tab').forEach(tab => {
+            const active = tab.dataset.view === view;
+            tab.classList.toggle('active', active);
+            tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+
+        if (showDownloads && !this.downloads.loaded) {
+            this.downloads.loaded = true;
+            const chatInput = document.getElementById('downloadsChat');
+            this.attachChatPicker(chatInput.closest('.filter-field'), chatInput, 'all');
+            this.loadDownloads();
+        }
+    }
+
+    // downloadsQuery turns the filter form into API parameters. Dates are local days: the
+    // bridge compares instants, so "From 20 Sep" becomes local midnight on the 20th and "To
+    // 20 Sep" becomes local midnight on the 21st, making the To day inclusive. Sending bare
+    // dates would mean UTC midnight and shift a day's edges by the viewer's offset.
+    downloadsQuery() {
+        const params = new URLSearchParams({
+            limit: String(this.downloads.limit),
+            offset: String(this.downloads.offset),
+            status: document.getElementById('downloadsStatus').value,
+        });
+
+        const chat = document.getElementById('downloadsChat').value.trim();
+        if (chat) params.set('chat', chat);
+
+        const from = document.getElementById('downloadsFrom').value;
+        if (from) params.set('after', new Date(`${from}T00:00:00`).toISOString());
+
+        const to = document.getElementById('downloadsTo').value;
+        if (to) {
+            const end = new Date(`${to}T00:00:00`);
+            end.setDate(end.getDate() + 1);
+            params.set('before', end.toISOString());
+        }
+        return params;
+    }
+
+    async loadDownloads() {
+        const loading = document.getElementById('downloadsLoading');
+        loading.hidden = false;
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/downloads?${this.downloadsQuery()}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.message || data.error || `HTTP ${response.status}`);
+            }
+            this.downloads.total = data.total || 0;
+            this.renderDownloads(Array.isArray(data.data) ? data.data : []);
+        } catch (error) {
+            console.error('Failed to load downloads:', error);
+            this.showToast('Failed to load downloads: ' + error.message, 'error');
+            this.renderDownloads([]);
+        } finally {
+            loading.hidden = true;
+        }
+    }
+
+    renderDownloads(items) {
+        const body = document.getElementById('downloadsBody');
+        body.innerHTML = '';
+        items.forEach(item => body.appendChild(this.createDownloadRow(item)));
+
+        const hasItems = items.length > 0;
+        document.getElementById('downloadsTable').hidden = !hasItems;
+        document.getElementById('noDownloads').hidden = hasItems;
+
+        const { offset, limit, total } = this.downloads;
+        const pager = document.getElementById('downloadsPager');
+        pager.hidden = total <= limit;
+        document.getElementById('downloadsRange').textContent =
+            hasItems ? `${offset + 1}–${offset + items.length} of ${total}` : `0 of ${total}`;
+        document.getElementById('downloadsPrev').disabled = offset === 0;
+        document.getElementById('downloadsNext').disabled = offset + items.length >= total;
+    }
+
+    // createDownloadRow builds one row. Chat names, senders and errors come from other
+    // people's WhatsApp accounts, so every value is set with textContent — never innerHTML.
+    createDownloadRow(item) {
+        const row = document.createElement('tr');
+        row.dataset.messageId = item.message_id;
+        if (item.status !== 'ok' || item.file_missing) row.classList.add('download-unavailable');
+
+        const cell = (text, className) => {
+            const td = document.createElement('td');
+            if (className) td.className = className;
+            td.textContent = text;
+            row.appendChild(td);
+            return td;
+        };
+
+        // The UI builds media URLs from its own API base, not the bridge's download_url:
+        // that is PUBLIC_BASE_URL, the container's DNS name, which a browser cannot resolve.
+        const mediaUrl = item.media_path
+            ? `${this.apiBaseUrl}/media/${item.media_path.split('/').map(encodeURIComponent).join('/')}`
+            : '';
+
+        const play = cell('', 'col-play');
+        if (mediaUrl) {
+            const audio = document.createElement('audio');
+            audio.controls = true;
+            audio.preload = 'none';
+            audio.src = mediaUrl;
+            play.appendChild(audio);
+        } else {
+            play.textContent = item.file_missing ? 'File missing' : this.downloadStatusLabel(item.status);
+            if (item.error) play.title = item.error;
+        }
+
+        const chat = cell(item.chat_name || item.chat_jid);
+        chat.title = item.chat_jid;
+
+        cell(item.timestamp ? new Date(item.timestamp).toLocaleString() : '—');
+        cell(item.is_from_me ? 'Me' : (item.sender || '—'));
+        cell(this.formatDuration(item.seconds), 'col-num');
+        cell(item.size_bytes ? this.formatBytes(item.size_bytes) : '—', 'col-num');
+
+        const save = cell('', 'col-save');
+        if (mediaUrl) {
+            const link = document.createElement('a');
+            link.href = `${mediaUrl}?download=1`;
+            link.className = 'btn-action';
+            link.title = 'Save this file';
+            link.setAttribute('aria-label', 'Save this file');
+            const icon = document.createElement('i');
+            icon.className = 'fas fa-download';
+            link.appendChild(icon);
+            save.appendChild(link);
+        }
+
+        return row;
+    }
+
+    downloadStatusLabel(status) {
+        const labels = {
+            ok: 'Downloaded',
+            failed: 'Failed',
+            retry_timeout: 'Phone did not answer',
+            expired_not_on_phone: 'Expired',
+            rekeyed_on_phone: 'Unrecoverable',
+            incomplete_metadata: 'No key stored',
+        };
+        return labels[status] || status;
+    }
+
+    formatDuration(seconds) {
+        if (!seconds) return '—';
+        const m = Math.floor(seconds / 60);
+        const s = String(seconds % 60).padStart(2, '0');
+        return `${m}:${s}`;
+    }
+
+    formatBytes(bytes) {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     }
 
     async handleFormSubmit(e) {

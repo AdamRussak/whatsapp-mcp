@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -691,6 +693,14 @@ func (s *Server) handleServeMedia(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", contentType)
+	// ?download=1 asks the browser to save rather than play. A header is the only way to do
+	// this for the UI: it runs on another port, and browsers ignore <a download> on
+	// cross-origin links. The filename comes from our own sanitised path; FormatMediaType
+	// still quotes it properly.
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition",
+			mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(targetPath)}))
+	}
 	http.ServeFile(w, r, targetPath)
 }
 
@@ -783,4 +793,225 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"whatsapp_connected": connected,
 		"auto_download":      autoDownload,
 	})
+}
+
+const (
+	defaultDownloadsLimit = 50
+	maxDownloadsLimit     = 500
+)
+
+// downloadStatuses are the values ?status= accepts; "all" lifts the filter.
+var downloadStatuses = map[string]bool{
+	database.DownloadStatusOK:                 true,
+	database.DownloadStatusFailed:             true,
+	database.DownloadStatusRetryTimeout:       true,
+	database.DownloadStatusNotOnPhone:         true,
+	database.DownloadStatusRekeyedOnPhone:     true,
+	database.DownloadStatusIncompleteMetadata: true,
+}
+
+// downloadItem is one row of GET /api/downloads.
+type downloadItem struct {
+	MessageID    string `json:"message_id"`
+	ChatJID      string `json:"chat_jid"`
+	ChatName     string `json:"chat_name,omitempty"`
+	Sender       string `json:"sender,omitempty"`
+	IsFromMe     bool   `json:"is_from_me"`
+	Timestamp    string `json:"timestamp,omitempty"`
+	Seconds      int    `json:"seconds,omitempty"`
+	IsPTT        bool   `json:"is_ptt"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+	DownloadedAt string `json:"downloaded_at,omitempty"`
+	SizeBytes    int64  `json:"size_bytes,omitempty"`
+	// MediaPath is relative to /api/media/. The UI builds its own URL from it, because
+	// DownloadURL is built from PUBLIC_BASE_URL — the bridge's container DNS name, which is
+	// right for the MCP server and other services on the Docker network but unresolvable
+	// from a user's browser.
+	MediaPath   string `json:"media_path,omitempty"`
+	DownloadURL string `json:"download_url,omitempty"`
+	// FileMissing marks an ok record whose file is no longer on disk.
+	FileMissing bool `json:"file_missing,omitempty"`
+}
+
+// handleDownloads lists downloaded media with the message behind each file
+// (GET /api/downloads).
+//
+// Query: chat (phone or any JID; expanded to the contact's phone and LID chats), after and
+// before (the message's send time, not the download time), status (default ok; "all"
+// for any), limit (default 50, cap 500), offset. Newest message first.
+func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+
+	status := q.Get("status")
+	switch {
+	case status == "":
+		status = database.DownloadStatusOK
+	case status == "all":
+		status = ""
+	case !downloadStatuses[status]:
+		SendJSONError(w, fmt.Sprintf("unknown status %q", status), http.StatusBadRequest)
+		return
+	}
+
+	limit, err := positiveInt(q.Get("limit"), defaultDownloadsLimit)
+	if err != nil {
+		SendJSONError(w, "limit must be a positive integer", http.StatusBadRequest)
+		return
+	}
+	if limit > maxDownloadsLimit {
+		limit = maxDownloadsLimit
+	}
+	offset := 0
+	if raw := q.Get("offset"); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			SendJSONError(w, "offset must be a non-negative integer", http.StatusBadRequest)
+			return
+		}
+	}
+
+	after, hasAfter, err := database.ParseTimeFilter(q.Get("after"))
+	if err != nil {
+		SendJSONError(w, "after: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	before, hasBefore, err := database.ParseTimeFilter(q.Get("before"))
+	if err != nil {
+		SendJSONError(w, "before: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var chatJIDs []string
+	if chat := strings.TrimSpace(q.Get("chat")); chat != "" {
+		chatJIDs, err = whatsapp.ResolveChatJIDs(chat, s.storeDir)
+		if err != nil {
+			SendJSONError(w, "chat: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	records, err := s.mediaStore.ListDownloadRecords(chatJIDs, status)
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to list downloads: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	wanted := make(map[string][]string, len(records))
+	for _, rec := range records {
+		wanted[rec.MessageID] = append(wanted[rec.MessageID], rec.ChatJID)
+	}
+	meta, err := s.messageStore.GetDownloadMetadata(wanted)
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to read message metadata: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Filter on the message's send time. A record whose message row is gone cannot be
+	// dated, so a date filter excludes it rather than guessing.
+	type row struct {
+		rec  database.MediaDownloadRecord
+		meta database.DownloadMetadata
+		has  bool
+	}
+	rows := make([]row, 0, len(records))
+	for _, rec := range records {
+		m, has := meta[database.DownloadKey(rec.MessageID, rec.ChatJID)]
+		if (hasAfter || hasBefore) && !has {
+			continue
+		}
+		if hasAfter && m.Timestamp.Before(after) {
+			continue
+		}
+		if hasBefore && !m.Timestamp.Before(before) {
+			continue
+		}
+		rows = append(rows, row{rec: rec, meta: m, has: has})
+	}
+
+	sort.SliceStable(rows, func(i, j int) bool {
+		if !rows[i].meta.Timestamp.Equal(rows[j].meta.Timestamp) {
+			return rows[i].meta.Timestamp.After(rows[j].meta.Timestamp)
+		}
+		return rows[i].rec.MessageID > rows[j].rec.MessageID
+	})
+
+	total := len(rows)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := rows[offset:end]
+
+	chatSet := make(map[string]bool)
+	for _, r := range page {
+		chatSet[r.rec.ChatJID] = true
+	}
+	chatList := make([]string, 0, len(chatSet))
+	for jid := range chatSet {
+		chatList = append(chatList, jid)
+	}
+	names, err := s.messageStore.GetChatNames(chatList)
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to read chat names: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	items := make([]downloadItem, 0, len(page))
+	for _, r := range page {
+		item := downloadItem{
+			MessageID: r.rec.MessageID,
+			ChatJID:   r.rec.ChatJID,
+			ChatName:  names[r.rec.ChatJID],
+			Status:    r.rec.Status,
+			Error:     r.rec.Error,
+		}
+		if r.has {
+			item.Sender = r.meta.Sender
+			item.IsFromMe = r.meta.IsFromMe
+			item.Timestamp = r.meta.Timestamp.UTC().Format(time.RFC3339)
+			item.Seconds = r.meta.Seconds
+			item.IsPTT = r.meta.IsPTT
+		}
+		if r.rec.DownloadedAt != nil {
+			item.DownloadedAt = r.rec.DownloadedAt.UTC().Format(time.RFC3339)
+		}
+		if r.rec.Status == database.DownloadStatusOK && r.rec.LocalPath != "" {
+			if fi, statErr := os.Stat(filepath.Join(s.storeDir, r.rec.LocalPath)); statErr == nil && fi.Mode().IsRegular() {
+				item.SizeBytes = fi.Size()
+				item.MediaPath = strings.TrimPrefix(filepath.ToSlash(r.rec.LocalPath), "media/")
+				item.DownloadURL = s.publicBaseURL + "/api/media/" + item.MediaPath
+			} else {
+				item.FileMissing = true
+			}
+		}
+		items = append(items, item)
+	}
+
+	SendJSON(w, map[string]interface{}{
+		"success": true,
+		"data":    items,
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
+	})
+}
+
+// positiveInt parses raw as a positive integer, returning def when raw is empty.
+func positiveInt(raw string, def int) (int, error) {
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("not a positive integer: %q", raw)
+	}
+	return n, nil
 }

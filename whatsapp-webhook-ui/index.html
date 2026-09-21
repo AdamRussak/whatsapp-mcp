@@ -16,7 +16,17 @@
             <p>Manage your webhook configurations</p>
         </header>
 
-        <main>
+        <!-- View switcher: listeners, and the media they captured -->
+        <nav class="view-switcher" role="tablist">
+            <button id="viewWebhooksBtn" class="view-tab active" role="tab" aria-selected="true" data-view="webhooks">
+                <i class="fas fa-bolt"></i> Webhooks
+            </button>
+            <button id="viewDownloadsBtn" class="view-tab" role="tab" aria-selected="false" data-view="downloads">
+                <i class="fas fa-download"></i> Downloads
+            </button>
+        </nav>
+
+        <main id="webhooksView">
             <!-- Action Buttons -->
             <div class="action-bar">
                 <button id="addWebhookBtn" class="btn btn-primary">
@@ -40,6 +50,69 @@
                 </div>
             </div>
         </main>
+
+        <!-- Downloads: every file the bridge saved, with the message behind it -->
+        <section id="downloadsView" hidden>
+            <form id="downloadsFilters" class="downloads-filters">
+                <div class="filter-field filter-chat">
+                    <label for="downloadsChat">Chat</label>
+                    <input type="text" id="downloadsChat" placeholder="All chats — search a name or number" autocomplete="off">
+                </div>
+                <div class="filter-field">
+                    <label for="downloadsFrom">From</label>
+                    <input type="date" id="downloadsFrom">
+                </div>
+                <div class="filter-field">
+                    <label for="downloadsTo">To</label>
+                    <input type="date" id="downloadsTo">
+                </div>
+                <div class="filter-field">
+                    <label for="downloadsStatus">Status</label>
+                    <select id="downloadsStatus">
+                        <option value="ok">Downloaded</option>
+                        <option value="failed">Failed</option>
+                        <option value="all">All</option>
+                    </select>
+                </div>
+                <div class="filter-actions">
+                    <button type="submit" class="btn btn-primary btn-small"><i class="fas fa-filter"></i> Apply</button>
+                    <button type="button" id="downloadsReset" class="btn btn-secondary btn-small">Reset</button>
+                </div>
+            </form>
+
+            <div id="downloadsLoading" class="loading" hidden>
+                <i class="fas fa-spinner fa-spin"></i> Loading downloads...
+            </div>
+
+            <div class="downloads-table-wrap">
+                <table id="downloadsTable" class="downloads-table" hidden>
+                    <thead>
+                        <tr>
+                            <th class="col-play">Play</th>
+                            <th>Chat</th>
+                            <th>Sent</th>
+                            <th>From</th>
+                            <th class="col-num">Length</th>
+                            <th class="col-num">Size</th>
+                            <th class="col-save">Save</th>
+                        </tr>
+                    </thead>
+                    <tbody id="downloadsBody"></tbody>
+                </table>
+            </div>
+
+            <div id="noDownloads" class="no-data" hidden>
+                <i class="fas fa-file-audio"></i>
+                <h3>No downloads match</h3>
+                <p>Widen the filters, or turn on auto-download for a listener.</p>
+            </div>
+
+            <div id="downloadsPager" class="downloads-pager" hidden>
+                <button type="button" id="downloadsPrev" class="btn btn-secondary btn-small"><i class="fas fa-chevron-left"></i> Newer</button>
+                <span id="downloadsRange"></span>
+                <button type="button" id="downloadsNext" class="btn btn-secondary btn-small">Older <i class="fas fa-chevron-right"></i></button>
+            </div>
+        </section>
     </div>
 
     <!-- Modal for Add/Edit Webhook -->
@@ -260,7 +333,7 @@
         <button id="toastClose" class="toast-close">&times;</button>
     </div>
 
-    <script src="script.js?v=5"></script>
+    <script src="script.js?v=6"></script>
 </body>
 
 </html>

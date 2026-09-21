@@ -90,7 +90,7 @@ else
   bad "/api/webhooks returned $STATUS"
 fi
 
-for path in "/api/chats?limit=1" "/api/webhook-logs"; do
+for path in "/api/chats?limit=1" "/api/downloads?limit=1" "/api/webhook-logs"; do
   get "$BRIDGE$path"
   [ "$STATUS" = "200" ] && ok "$path answers" || bad "$path returned $STATUS"
 done
@@ -104,7 +104,7 @@ if [ "$STATUS" = "200" ]; then
   # Substring matching in the shell, not `printf | grep -q`: grep exits on its first match,
   # printf takes SIGPIPE, and with `pipefail` the pipeline reports failure — so an early
   # match looks like a miss. That bug made this script report a stale UI that was fine.
-  for marker in autoDownload autoDownloadVoiceOnly voiceOnlyGroup; do
+  for marker in autoDownload autoDownloadVoiceOnly voiceOnlyGroup downloadsView; do
     if [[ "$index" == *"$marker"* ]]; then
       ok "index.html has $marker"
     else
@@ -119,7 +119,7 @@ if [ "$STATUS" = "200" ]; then
     ok "index.html requests $script_src"
     get "$UI/$script_src"; script="$BODY"
     if [ "$STATUS" = "200" ]; then
-      for fn in syncAutoDownloadFields attachChatPicker renderChatOptions; do
+      for fn in syncAutoDownloadFields attachChatPicker renderChatOptions createDownloadRow; do
         if [[ "$script" == *"$fn"* ]]; then
           ok "$script_src defines $fn"
         else

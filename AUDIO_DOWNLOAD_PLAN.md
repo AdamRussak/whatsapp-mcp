@@ -76,6 +76,7 @@ All three goals are met for media inside the CDN window. What remains is ergonom
 | B8 ✅ | low | *(fixed: `NormalizeTimeFilter`; invalid → 400)* `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
 | B9 | low | `MediaDownloader` (`media.go`) is still unused — nothing constructs it. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` now flags only `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go` (`types.go` and `whatsapp/handlers.go` were formatted in Phase 1). Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
 | B11 ✅ | med | *(fixed: `buildTriggerAliases` expands exact `sender`/`chat_jid` values through `whatsmeow_lid_map` at load)* A trigger typed as a phone number matched nothing: 1:1 chats are LID-addressed now (§3.2 finding 6) and `matchesTrigger` compares raw strings. It also silently broke the existing `me-number` webhook, which came back to life on deploy. See §2.15. | `webhook/manager.go` |
+| B12 | **med** | **100 chats are named after the user.** `GetChatName` falls back to the message's `sender` when the contact lookup fails; if the first message stored in a 1:1 chat is your own, the chat is named after *you*. `62156783493249@lid` (the contact `972547669192`, correctly named on its phone-JID chat) reads `14018823594220` — the user's own LID. 100 chats carry the user's own LID or number as their name (52 with audio), so the chat picker and the Downloads view show them as indistinguishable. 659 `@lid` chats are named after some bare number. Pre-existing; surfaced by Phase 7. Fix: never name a 1:1 chat after a from-me sender, prefer the paired phone chat's name via `whatsmeow_lid_map`, then a one-off repair of `chats.name` (regenerable per §4.3). | `whatsapp/handlers.go:85` |
 | B10 ✅ | low | *(fixed in Phase 1, §2.11)* `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
 ### 2.4 Next steps (in order)
@@ -378,6 +379,7 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 | # | Item | Notes |
 |---|---|---|
 | B1 | Media retry returns re-keyed copies | No fix known; anything past ~11–19 days is unrecoverable. Recorded honestly as `rekeyed_on_phone`. |
+| B12 | 100 chats named after the user | Makes the chat picker and the Downloads view show 100 different conversations under one identical name. Recommended next, before 7.4 — see §2.3. |
 | B9 | Cosmetic leftovers | `MediaDownloader` in `media.go` is still unused; `gofmt` flags `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go`; the Python `download_media` error-key check is unconfirmed. |
 
 **Gaps in what shipped**
@@ -788,7 +790,7 @@ type Downloader interface {
 
 `transcribe_voice_message(message_id, chat_jid, language)` MCP tool with `faster-whisper` or an API backend; cache in a `transcripts` table; add `transcript` to `list_messages`; optional `transcribe: true` on auto-download rules.
 
-### Phase 7 — Listener ergonomics, retention and a downloads view 🟡 (7.1 ✅, 7.2 ✅, rest ❌)
+### Phase 7 — Listener ergonomics, retention and a downloads view 🟡 (7.1–7.3 ✅, 7.4–7.5 ❌)
 
 Four items from §2.16, in the order they should land. The sequence is deliberate: the chat
 picker unblocks two UIs, the health endpoint and smoke check make every later deploy
@@ -854,7 +856,7 @@ the *reassuring* direction:
   looked present. Content checks now use shell substring matching (`[[ $body == *X* ]]`),
   no pipeline.
 
-#### 7.3 Downloads endpoint and view
+#### 7.3 Downloads endpoint and view ✅ (deployed 2026-09-21)
 
 - **`GET /api/downloads`** — `chat` (expanded through `ResolveChatJIDs`), `after` / `before`
   (normalised by `NormalizeTimeFilter`, the B8 fix), `status` (default `ok`), `limit`
@@ -871,6 +873,34 @@ the *reassuring* direction:
   filter bar (the 7.1 picker, reused, plus a date range) over a table of one row per file:
   duration, chat, timestamp, direction, size, an inline `<audio controls preload="none">`
   and a download link. Paged.
+
+**Shipped as described.** Reconciled against the live archive: `total` for `status=ok` is 270,
+equal to `media.db`'s ok count, and the per-status totals sum to `all` (4,230). A phone-number
+chat filter reaches the `@lid` chat; a one-day date filter returns only messages *sent* that
+day; `/api/media/…` streams with range support and `?download=1` attaches. 8 new Go tests.
+
+Decisions worth keeping:
+- **Dates are send times, not download times.** The whole backlog sweep was downloaded on
+  one day, so filtering by download time would make every date range return all or nothing.
+  The test seeds exactly that shape so the mistake cannot come back unnoticed.
+- **The UI ignores `download_url`** and builds URLs from `media_path` plus its own API base.
+  `PUBLIC_BASE_URL` is the bridge's container DNS name — right for the MCP server on the
+  Docker network, unresolvable from a browser. Both fields are returned.
+- **Date filters are sent as local-day instants.** The API compares instants; a bare
+  `YYYY-MM-DD` is UTC midnight, which at UTC+3 moves a day's edges by three hours. The UI
+  converts the picked day to local midnight and makes "To" inclusive.
+- **`?download=1` sets `Content-Disposition`** because the UI is on another port, and
+  browsers ignore `<a download>` on cross-origin links.
+- **Every value is rendered with `textContent`.** Chat names and senders are set by other
+  WhatsApp users; `innerHTML` here would be an injection point.
+- **A global `[hidden]{display:none!important}`**, since the pager needs `display:flex` and
+  author CSS otherwise defeats the `hidden` attribute.
+- **Unpaged scan, paged in Go.** `media.db` has no send time, so filtering needs the join
+  first. At ~4,200 records that is one cheap pass; revisit if the archive grows by orders of
+  magnitude.
+
+Known limitation: chat names inherit B12, so 100 conversations display under the user's own
+LID.
 
 #### 7.4 UI tests
 

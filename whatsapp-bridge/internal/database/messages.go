@@ -386,3 +386,150 @@ func (store *MessageStore) ListChats(query, kind string, limit int) ([]ChatSumma
 	}
 	return chats, rows.Err()
 }
+
+// DownloadMetadata is what the downloads view shows about the message behind a file.
+type DownloadMetadata struct {
+	Sender    string
+	Timestamp time.Time
+	IsFromMe  bool
+	Seconds   int
+	IsPTT     bool
+	Mimetype  string
+}
+
+// metadataBatch keeps each IN (...) list well under SQLite's bound-parameter limit.
+const metadataBatch = 500
+
+// DownloadKey identifies one message in one chat; the same message ID can exist under a
+// contact's phone JID and its LID JID.
+func DownloadKey(messageID, chatJID string) string {
+	return chatJID + "/" + messageID
+}
+
+// GetDownloadMetadata looks up the messages behind a set of downloads, keyed by
+// DownloadKey. Read-only: download bookkeeping never writes to messages.db (§5.1).
+//
+// It selects by message ID and matches the chat in Go, because the pair is what identifies
+// a message and a plain IN list is portable across SQLite versions.
+func (store *MessageStore) GetDownloadMetadata(keys map[string][]string) (map[string]DownloadMetadata, error) {
+	// keys: message ID -> the chat JIDs it is wanted under
+	ids := make([]string, 0, len(keys))
+	for id := range keys {
+		ids = append(ids, id)
+	}
+
+	out := make(map[string]DownloadMetadata, len(ids))
+	for start := 0; start < len(ids); start += metadataBatch {
+		end := start + metadataBatch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+
+		rows, err := store.db.Query(`SELECT id, chat_jid, sender, timestamp, is_from_me, seconds, is_ptt, mimetype
+			FROM messages WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+
+		for rows.Next() {
+			var id, chatJID string
+			var sender, mimetype sql.NullString
+			var timestamp time.Time
+			var isFromMe sql.NullBool
+			var seconds sql.NullInt64
+			var isPTT sql.NullBool
+			if err := rows.Scan(&id, &chatJID, &sender, &timestamp, &isFromMe, &seconds, &isPTT, &mimetype); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			wanted := false
+			for _, jid := range keys[id] {
+				if jid == chatJID {
+					wanted = true
+					break
+				}
+			}
+			if !wanted {
+				continue
+			}
+			out[DownloadKey(id, chatJID)] = DownloadMetadata{
+				Sender:    sender.String,
+				Timestamp: timestamp,
+				IsFromMe:  isFromMe.Bool,
+				Seconds:   int(seconds.Int64),
+				IsPTT:     isPTT.Bool,
+				Mimetype:  mimetype.String,
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
+// GetChatNames returns the stored name for each chat JID that has one.
+func (store *MessageStore) GetChatNames(jids []string) (map[string]string, error) {
+	out := make(map[string]string, len(jids))
+	for start := 0; start < len(jids); start += metadataBatch {
+		end := start + metadataBatch
+		if end > len(jids) {
+			end = len(jids)
+		}
+		batch := jids[start:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for i, jid := range batch {
+			placeholders[i] = "?"
+			args[i] = jid
+		}
+
+		rows, err := store.db.Query(`SELECT jid, name FROM chats WHERE jid IN (`+strings.Join(placeholders, ",")+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var jid string
+			var name sql.NullString
+			if err := rows.Scan(&jid, &name); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if name.String != "" {
+				out[jid] = name.String
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
+// ParseTimeFilter parses an after/before filter in any accepted layout. ok is false for an
+// empty filter.
+func ParseTimeFilter(s string) (t time.Time, ok bool, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false, nil
+	}
+	for _, layout := range timeFilterLayouts {
+		if parsed, perr := time.Parse(layout, s); perr == nil {
+			return parsed.UTC(), true, nil
+		}
+	}
+	return time.Time{}, false, fmt.Errorf("unrecognized time %q (use RFC 3339, \"YYYY-MM-DD HH:MM:SS\" or YYYY-MM-DD)", s)
+}
