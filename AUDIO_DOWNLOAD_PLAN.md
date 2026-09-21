@@ -16,7 +16,7 @@ Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started 
 | G3 | Download past voice messages from one chat or group | Milestone 1 (batch job) → Phase 5 (by sender, history request) | ✅ batch job run over the target contact's full history (4,062 items, §2.9); only the last ~11–19 days are recoverable (B1) |
 | G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | ✅ live since 2026-09-21 (auto-download is an action on a webhook entry, §2.14) |
 
-Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ → backlog sweep ✅ → Phase 4 ✅ (brought forward, §2.12) → Phases 2/3 ← next → Phase 5 → Phase 6.**
+Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ → backlog sweep ✅ → Phase 4 ✅ (brought forward, §2.12) → Phase 7 ← next → Phases 2/3 → Phase 5 → Phase 6.**
 
 All three goals are met for media inside the CDN window. What remains is ergonomics (Phases 2/3: MCP tools, MP3 conversion, a Gradio tab), the low-payoff history request (Phase 5), transcription (Phase 6), and the operational gaps in §2.16.
 
@@ -369,8 +369,8 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 | # | Item | Notes |
 |---|---|---|
 | O1 | **Re-pairing after S1 is still undecided** (§2.4 step 1) | The session DB was served on an open port for an unknown window. No access log exists, so there is no way to tell whether it was fetched. Your call. |
-| O2 | **Port 8080 is still public and unauthenticated** | `/api/download`, `/api/media/` and `/api/webhooks` all answer anyone who can reach the host. S1 is fixed, but the surface is unchanged: bind to localhost or the Docker network, or add token auth. |
-| O3 | **No retention policy for captured media** | Negligible at voice-note volume (281 files, ~30 MB). Becomes load-bearing the moment capture widens to images or video. |
+| O2 | **Port 8080 is still public and unauthenticated** ⚠️ **worsens with Phase 7** | `/api/download`, `/api/media/` and `/api/webhooks` all answer anyone who can reach the host. S1 is fixed, but the surface is unchanged. Phase 7 adds `/api/chats` (the whole address book) and `/api/downloads` (the media index) with auth declined on 2026-09-21, so the exposure grows. Bind to localhost or the Docker network, or add token auth. |
+| O3 | **No retention policy for captured media** | Negligible at voice-note volume (281 files, ~30 MB). Becomes load-bearing the moment capture widens to images or video. Planned as §6 Phase 7.5 (per listener, schema v4). |
 | O4 | **`me-number` webhook is live again** | It matched nothing for months (B11) and now fires on your own messages. If n8n acts on it, check that before it surprises you. |
 
 **Known bugs**
@@ -386,8 +386,8 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 |---|---|---|
 | G-a | **Auto-download captures audio only** | The gate is hard-limited to `media_type == "audio"`; images, video and documents are never queued even with a matching trigger. Deliberate (goal G2 is about voice), but it is the first thing a user asks for after seeing an image arrive. A contained change if wanted. |
 | G-b | **The exclusion path is unit-tested, not live-proven** | Every live message since deploy that reached a rule was audio, so "a non-matching message is correctly skipped" has never been demonstrated on real traffic. |
-| G-c | **No chat picker in the UI** | A rule still means typing a phone number or pasting a group JID. B11 made phone numbers work; it did not make them discoverable. Needs `GET /api/chats` plus a dropdown. |
-| G-d | **The UI has no lint or tests** | There is no JS toolchain in this environment; `script.js` changes are read-checked and then exercised by hand. |
+| G-c | **No chat picker in the UI** | A rule still means typing a phone number or pasting a group JID. B11 made phone numbers work; it did not make them discoverable. Planned as §6 Phase 7.1. |
+| G-d | **The UI has no lint or tests** | There is no JS toolchain in this environment; `script.js` changes are read-checked and then exercised by hand. Planned as §6 Phase 7.4 (jsdom in a container, plus a deploy smoke check). |
 | G-e | **Rollback was verified by query, not by drill** | The pre-phase4 binary's exact `SELECT`/`INSERT` were run against a v3 copy and work. The old image was never actually booted against a migrated database (§4.6 step 9 remains partly owed). |
 
 **Later phases, unchanged in scope:** Phase 2 (MCP fallback download, `list_messages(media_type)`, MP3 conversion), Phase 3 (MCP tools and a Gradio tab), Phase 5 (batch by sender; the history request is explicitly low-payoff because of B1), Phase 6 (transcription). Plus the §5.2 parity fix: `batch_download_chat_audio` still exposes only `chat`, `limit`, `skip_cached`, `retry_failed`.
@@ -786,6 +786,133 @@ type Downloader interface {
 ### Phase 6 — Transcription (later) ❌
 
 `transcribe_voice_message(message_id, chat_jid, language)` MCP tool with `faster-whisper` or an API backend; cache in a `transcripts` table; add `transcript` to `list_messages`; optional `transcribe: true` on auto-download rules.
+
+### Phase 7 — Listener ergonomics, retention and a downloads view ❌ (planned 2026-09-21)
+
+Four items from §2.16, in the order they should land. The sequence is deliberate: the chat
+picker unblocks two UIs, the health endpoint and smoke check make every later deploy
+verifiable, and **retention goes last** because it is the only step that deletes files and it
+should land on a codebase that already has a test harness and a post-deploy check.
+
+> [!WARNING]
+> **Accepted risk, decided 2026-09-21.** Both new endpoints widen what the unauthenticated
+> port 8080 exposes: `/api/chats` returns the whole contact and group list, `/api/downloads`
+> indexes every saved voice note. Token auth and binding to localhost were both declined for
+> now, so **O2 gets worse with this phase, not better**. Anything that can reach the host can
+> enumerate the address book and the media index. This is a conscious trade, recorded so it
+> is not rediscovered later.
+
+#### 7.1 Chat picker
+
+A rule still means typing an identifier. B11 made phone numbers work; it did not make them
+discoverable (§2.16 G-c).
+
+- **`GET /api/chats`** — `q` (case-insensitive substring of name or JID), `type`
+  (`all|contact|group`), `limit` (default 50, hard cap 200). Returns
+  `{jid, name, last_message_time, is_group}` ordered by `last_message_time DESC`, read-only
+  from `chats` (3,936 rows) with explicit columns — `SELECT *` stays banned.
+- **UI**: for `chat_jid` and `sender` triggers the value field becomes an input backed by a
+  `<datalist>` repopulated on a 200 ms debounce from `/api/chats?q=`. Picking an option sets
+  the **JID** and shows the chat name beneath it. Free text is still accepted, which matters
+  because a phone number is now a valid value.
+- `sender` triggers offer 1:1 chats only. The picker lists chats, not group participants, so
+  "this person inside that group" still means typing their number — document it in the hint
+  rather than pretending otherwise.
+- Known rough edge: `chats.name` falls back to the JID user part when the contact never
+  resolved, so some rows will show a bare LID (the live `62156783493249@lid` reads
+  `14018823594220`). Display it as-is; inventing a nicer label would be guessing.
+
+#### 7.2 Health endpoint and deploy smoke check
+
+The two failures that cost time today were deployment-shaped, not logic-shaped: a stale
+container served old assets while everything reported "Built" and "Up/healthy" (§2.10,
+§2.15). A check that reads the *running* system is the fix.
+
+- **`GET /api/health`** → `{status, schema_version, auto_download: {enabled, workers, queue_depth}}`.
+  This is what makes a deploy verifiable without grepping container logs.
+- **`scripts/smoke.sh`** — plain `curl`, no toolchain, exits non-zero on any failure:
+  - UI: `index.html` carries the current markers; the `script.js?v=N` it references serves a
+    body containing the expected symbols (catches cache-buster drift *and* a stale container).
+  - Bridge: `/api/health` reports the expected schema version; `/api/webhooks` returns 200 and
+    every entry carries `auto_download` and `auto_download_voice_only`; `/api/chats?limit=1`
+    and `/api/downloads?limit=1` answer 200.
+- Add it to §4.6 as the step that closes a deploy.
+
+#### 7.3 Downloads endpoint and view
+
+- **`GET /api/downloads`** — `chat` (expanded through `ResolveChatJIDs`), `after` / `before`
+  (normalised by `NormalizeTimeFilter`, the B8 fix), `status` (default `ok`), `limit`
+  (default 50, cap 500), `offset`. Returns `{items, total}`.
+- Per item: `message_id`, `chat_jid`, `chat_name`, `sender`, `is_from_me`, `timestamp`,
+  `seconds`, `is_ptt`, `size_bytes`, `status`, `download_url`.
+- `media.db` and `messages.db` are separate files, so this is **two queries joined in Go**,
+  not an `ATTACH`: the records come from `media_downloads`, the metadata from `messages` and
+  `chats` by `(message_id, chat_jid)`. Keeping them unattached is what keeps the read-only
+  guard on `messages.db` simple and the §2.8 guard tests valid.
+- **`GET /api/media/<path>?download=1`** adds `Content-Disposition: attachment`. Without the
+  flag it streams inline exactly as now, so the `<audio>` player is unaffected.
+- **UI**: a `Webhooks | Downloads` switcher at the top of the page. The Downloads view is a
+  filter bar (the 7.1 picker, reused, plus a date range) over a table of one row per file:
+  duration, chat, timestamp, direction, size, an inline `<audio controls preload="none">`
+  and a download link. Paged.
+
+#### 7.4 UI tests
+
+Two layers, because they catch different things.
+
+- **`scripts/smoke.sh`** (7.2) is the deployment layer, and the one that would have caught
+  both stale-container incidents.
+- **jsdom unit tests** in `whatsapp-webhook-ui/test/`: `package.json` with a single dev
+  dependency (`jsdom`) and Node's built-in `node:test`. Run through
+  `scripts/test-ui.sh`, which wraps `docker run --rm -v … node:22` — **nothing is installed
+  on the host**, which has no Node at all. Commit `package.json` and `package-lock.json`;
+  never `node_modules/` (add it to `.gitignore`).
+- The tests load the real `index.html` into jsdom, execute `script.js` as the page does and
+  stub `fetch`, so **no change to `script.js` is needed** and a field missing from the HTML
+  fails the test rather than silently rendering nothing.
+- Cases: a capture log renders `CAPTURED` with its path and duration; a delivery log still
+  renders `HTTP 200`; ticking auto-download reveals voice-only and waives the URL
+  requirement; the submitted payload carries the new fields; a card shows the badge and the
+  download-only URL placeholder; the chat picker fills the trigger value.
+
+#### 7.5 Per-listener retention (schema v4) — destructive, lands last
+
+- **Schema v4**: `webhook_configs.retention_days INTEGER` (NULL or 0 = keep forever), plus
+  the same column in `createTables`. Additive with a constant default, per §4.2.
+- **New `media.db` status `pruned`**, treated as *permanent* alongside `rekeyed_on_phone`:
+  `DownloadMediaWithOptions` returns early on it instead of re-fetching, so a later batch run
+  cannot silently resurrect what you asked to expire. Overridable by `retry_failed` (batch) or
+  an explicit `force` (single) — deliberate re-fetch stays possible, accidental does not.
+- **`internal/retention/sweeper.go`** — hourly (`RETENTION_SWEEP_INTERVAL_M`, default 60),
+  plus once about a minute after start. Per enabled config with `retention_days > 0`:
+  - candidates are that rule's own capture logs (`webhook_logs`, `event_type='auto_download'`,
+    `delivered_at NOT NULL`) older than N days;
+  - **skip if any other rule also captured it** and that rule's retention is unlimited or not
+    yet expired;
+  - **skip anything with no capture log at all** — that is a manual `/api/download` or batch
+    fetch, which the user asked for by hand and retention must never touch;
+  - delete the file, set the `media.db` row to `pruned` (keeping `local_path` for history),
+    and write a `webhook_logs` row with `event_type='retention'` so deletions appear in the
+    same Logs view as captures — trust in a destructive feature requires a visible record.
+- **Guards, because this deletes files.** Every path is resolved with the *same* sanitiser
+  `/api/media/` uses (`EvalSymlinks`, must stay inside `<storeDir>/media/`, `.ogg`/`.mp3`
+  only); anything else is refused and logged, never deleted. `index.json` is never a
+  candidate. A per-sweep cap (500 deletions) so a misconfigured rule cannot empty the archive
+  in one pass. `RETENTION_DRY_RUN=true` logs what it would remove and deletes nothing — run
+  the first live sweep this way.
+- **§4.7 gains a review blocker:** any file deletion that does not go through that sanitiser,
+  or that can name a path outside `store/media/`.
+- **UI**: a `Keep for [N] days` field beside the auto-download checkboxes, blank = forever.
+- **Tests**: only that rule's expired captures are chosen; a file another rule still wants is
+  kept; a manual download is never touched; a path outside the media root is refused; dry-run
+  deletes nothing; the row becomes `pruned`; a `pruned` record is not re-downloaded without
+  an explicit override; the per-sweep cap holds.
+
+#### Deploy
+
+7.1–7.4 touch no schema and deploy normally (`up -d --build --force-recreate`, then
+`scripts/smoke.sh`). 7.5 adds migration v4, so it takes the full §4.6 checklist including a
+rehearsal on a copy, and its first sweep runs with `RETENTION_DRY_RUN=true`.
 
 ---
 
