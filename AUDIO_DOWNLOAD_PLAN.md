@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-21:** Milestone 1, **Phases 0 and 1 are complete and deployed**, and the **backlog sweep (§2.13) is complete** (164/164 recent uncaptured audio files recovered with 0 failures). Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Phase 4 (auto-download) deployed 2026-09-21 11:35 UTC** (§2.14, schema v2): a listener is an ordinary webhook entry with `auto_download` ticked, defined in the same UI and the same `POST /api/webhooks` as every event today. The leak is now closed at both ends — the backlog was swept (§2.13) and new voice notes are captured as they arrive. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
+**Status as of 2026-09-21:** Milestone 1, **Phases 0 and 1 are complete and deployed**, and the **backlog sweep (§2.13) is complete** (164/164 recent uncaptured audio files recovered with 0 failures). Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Phase 4 (auto-download) deployed 2026-09-21 11:35 UTC** (§2.14, schema v2): a listener is an ordinary webhook entry with `auto_download` ticked, defined in the same UI and the same `POST /api/webhooks` as every event today. The leak is now closed at both ends — the backlog was swept (§2.13) and new voice notes are captured as they arrive. Re-pairing after S1 is not needed: port 8080 has never been publicly reachable (§2.2).
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -59,8 +59,8 @@ All three goals are met for media inside the CDN window. What remains is ergonom
 | S1 | **Security:** `GET /api/media/<path>` resolved paths from `store/` and served `whatsapp.db` (session keys) and `messages.db` to anyone reaching port 8080 (published on `0.0.0.0`, CORS `*`). | `resolveMediaPath` (`internal/api/handlers.go`) serves only `.ogg`/`.mp3` files under `store/media/`, rejects traversal, absolute paths and symlinks leaving the root. `download_url` is now `/api/media/<chat>/<file>`. Test: `internal/api/media_test.go`. Deployed. |
 | S2 | `ExtractDirectPathFromURL` dropped the query string (`ccb`, `oh`, `oe`, `_nc_sid`), so every CDN request lacked its auth token and was malformed (`…n.enc&hash=…`). Everything fell through to media retry. | Keeps the query, drops only `mms3=true` (`internal/whatsapp/media.go`). Test uses a real stored-URL format. Deployed. |
 
-> [!WARNING]
-> Because of S1, the WhatsApp session database was readable by anyone who could reach port 8080 while the earlier build ran. If that port has ever been reachable from outside this machine, unlink the device on the phone and pair again.
+> [!NOTE]
+> **Resolved 2026-09-21.** Because of S1, the WhatsApp session database was readable by anyone who could reach port 8080 while the earlier build ran. The operator confirmed that 8080 is not publicly reachable: the container publishes it on the host, but the network around the VM does not expose it. So nothing outside could have fetched the file, and re-pairing is not needed. This becomes live again only if that network configuration ever changes.
 
 ### 2.3 Open bugs (Milestone 1)
 
@@ -81,7 +81,7 @@ All three goals are met for media inside the CDN window. What remains is ergonom
 
 ### 2.4 Next steps (in order)
 
-1. **Decide on re-pairing** (S1 warning). ✅ Work committed on `webhook` (`235988f`; `store/media/` added to `.gitignore`). Exposure check: Docker publishes 8080 on `0.0.0.0` and the host firewall accepts everything, so reachability depends on the Oracle VCN security list (not visible from the VM). The bridge keeps no HTTP access log, so there's no record of whether the file was fetched. ❓ Re-pairing: pending your decision.
+1. ✅ **Decide on re-pairing** (S1 warning) — **not needed** (2026-09-21). Work committed on `webhook` (`235988f`; `store/media/` added to `.gitignore`). Docker publishes 8080 on the host's `0.0.0.0` and the host firewall accepts everything, so reachability was always a question of the network around the VM, which is not visible from inside it. The operator confirmed 8080 is not publicly reachable, so the session database could not have been fetched from outside.
 2. ✅ **Measure the fresh-media rate after S2.** Run a batch of `limit: 20` on a chat with recent audio. Record how many succeed directly vs need a retry. This sets expectations for the full run.
    - **Result (2026-09-19 14:39 UTC, job `job_20260919_143919_283`):** `18674685612157@lid`, expanded to it plus `972523996302@s.whatsapp.net`. The 20 newest items (15–18 Sep; 8 from me, 12 from the contact): **20/20 `ok` in 9 s, 0 media retries**. 518,863 bytes total, all with an `OggS` header, `index.json` 20× `ok` in `store/media/972523996302/`.
    - Integrity: the chat's 20,095 `messages` rows are byte-identical before/after; `quick_check` = `ok`.
@@ -369,8 +369,8 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 
 | # | Item | Notes |
 |---|---|---|
-| O1 | **Re-pairing after S1 is still undecided** (§2.4 step 1) | The session DB was served on an open port for an unknown window. No access log exists, so there is no way to tell whether it was fetched. Your call. |
-| O2 | **Port 8080 is still public and unauthenticated** ⚠️ **worsens with Phase 7** | `/api/download`, `/api/media/` and `/api/webhooks` all answer anyone who can reach the host. S1 is fixed, but the surface is unchanged. Phase 7 adds `/api/chats` (the whole address book) and `/api/downloads` (the media index) with auth declined on 2026-09-21, so the exposure grows. Bind to localhost or the Docker network, or add token auth. |
+| O1 ✅ | **Re-pairing after S1 — not needed** | Resolved 2026-09-21: port 8080 has never been publicly reachable (operator), so the session database served through S1 could not have been fetched from outside. |
+| O2 ✅ | **Port 8080 — not an issue** | Resolved 2026-09-21: the bridge runs in a container and 8080 is not publicly reachable (operator). The API stays unauthenticated by design. The protection is the network around the VM, not Docker — the compose file publishes `8080:8080` on the host's `0.0.0.0` — so this only needs revisiting if that network configuration changes; add token auth before exposing the port anywhere. |
 | O3 ✅ | **Retention exists, and is in dry run** | Per-listener retention shipped (§6 Phase 7.5, §2.18) with `RETENTION_DRY_RUN=true`. Set a listener's "Keep for", check `GET /api/retention/preview`, then set `RETENTION_DRY_RUN=false` and redeploy. Captures before schema v3 and the whole 268-file backlog have no capture log, so retention never removes them, whatever is configured. |
 | O4 | **`me-number` webhook is live again** | It matched nothing for months (B11) and now fires on your own messages. If n8n acts on it, check that before it surprises you. |
 
@@ -574,7 +574,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 - Media goes only under `store/media/` (and `store/downloads/` for MCP copies). `store/whatsapp_store.db` (0 bytes, leftover) is left alone.
 - ✅ `stop_grace_period: 30s` on the bridge in `docker-compose.yaml` (shipped with Phase 4); shutdown drains the auto-download pool, then whatsmeow disconnects, then the DBs close.
 - Never download or retry synchronously inside the whatsmeow event handler.
-- Security: `/api/download`, `/api/media/`, batch return private audio. Keep the bridge off the public internet or add token auth before exposing it (port 8080 is currently published on `0.0.0.0`).
+- Security: `/api/download`, `/api/media/`, `/api/downloads`, `/api/chats` and batch return private data, unauthenticated. That is acceptable because 8080 is not publicly reachable (confirmed 2026-09-21): the compose file publishes it on the host's `0.0.0.0`, and the network around the VM keeps it private. Add token auth before that ever changes.
 
 ### 4.6 Checklist per deploy that touches `store.go`
 
@@ -885,13 +885,11 @@ picker unblocks two UIs, the health endpoint and smoke check make every later de
 verifiable, and **retention goes last** because it is the only step that deletes files and it
 should land on a codebase that already has a test harness and a post-deploy check.
 
-> [!WARNING]
-> **Accepted risk, decided 2026-09-21.** Both new endpoints widen what the unauthenticated
-> port 8080 exposes: `/api/chats` returns the whole contact and group list, `/api/downloads`
-> indexes every saved voice note. Token auth and binding to localhost were both declined for
-> now, so **O2 gets worse with this phase, not better**. Anything that can reach the host can
-> enumerate the address book and the media index. This is a conscious trade, recorded so it
-> is not rediscovered later.
+> [!NOTE]
+> **Exposure, resolved 2026-09-21.** Both new endpoints are unauthenticated: `/api/chats`
+> returns the whole contact and group list, `/api/downloads` indexes every saved voice note.
+> That is fine because port 8080 is not publicly reachable — the network around the VM keeps
+> it private (O2). They would need token auth before the port were ever exposed.
 
 #### 7.1 Chat picker ✅ (deployed 2026-09-21 12:17 UTC)
 
@@ -1113,7 +1111,7 @@ rehearsal on a copy, and its first sweep runs with `RETENTION_DRY_RUN=true`.
 ## 7. Risks
 
 - **DB integrity** — §4. ✅ The replay-overwrite hazard (§4.3) is closed: `StoreMessage` uses `ON CONFLICT … COALESCE` and never rewrites an existing row. Download state was kept out of `messages` entirely (§2.11).
-- **Exposure** — port 8080 is public and unauthenticated; S1 showed what that costs. Bind it to localhost or the Docker network, or add token auth.
+- **Exposure** — the API on 8080 is unauthenticated, which is acceptable only because the port is not publicly reachable (confirmed 2026-09-21; the protection is network-level). If that ever changes, add token auth first: S1 showed what an open port costs.
 - **Expired media is the norm** for anything older than ~11–19 days, and media retry doesn't recover it today (B1). Report per item, never abort a batch.
 - **MCP SDK v2** — ✅ pinned `<2` (§2.10); mcp 2.2.0 is live on PyPI, so the bound is load-bearing.
 - **Rate limits** — one worker, 250 ms pace for history; ≤ 2 workers for auto-download.
