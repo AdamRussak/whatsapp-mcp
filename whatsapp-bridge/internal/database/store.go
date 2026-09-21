@@ -102,7 +102,9 @@ func createTables(db *sql.DB) error {
 			secret_token TEXT,
 			enabled BOOLEAN DEFAULT 1,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			auto_download BOOLEAN DEFAULT 0,
+			auto_download_voice_only BOOLEAN DEFAULT 1
 		);
 
 		CREATE TABLE IF NOT EXISTS webhook_triggers (

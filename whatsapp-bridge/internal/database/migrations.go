@@ -34,6 +34,20 @@ var migrations = []migration{
 			})
 		},
 	},
+	{
+		version: 2,
+		name:    "auto-download action on webhook configs",
+		apply: func(tx *sql.Tx) error {
+			// Auto-download is an action on the trigger rules that already exist, not a
+			// second rule engine: a listener is an ordinary webhook config with these on.
+			// createTables carries the same two columns, so on a fresh database this is a
+			// no-op (addColumns skips what PRAGMA table_info already shows).
+			return addColumns(tx, "webhook_configs", []column{
+				{"auto_download", "BOOLEAN DEFAULT 0"},
+				{"auto_download_voice_only", "BOOLEAN DEFAULT 1"},
+			})
+		},
+	},
 }
 
 type column struct {

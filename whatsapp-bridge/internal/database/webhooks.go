@@ -8,9 +8,10 @@ import (
 // StoreWebhookConfig stores a webhook configuration in the database
 func (store *MessageStore) StoreWebhookConfig(config *types.WebhookConfig) error {
 	result, err := store.db.Exec(
-		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled) 
-		 VALUES (?, ?, ?, ?)`,
+		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled, auto_download, auto_download_voice_only)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
+		config.AutoDownload, config.VoiceOnly(),
 	)
 	if err != nil {
 		return err
@@ -37,15 +38,19 @@ func (store *MessageStore) StoreWebhookConfig(config *types.WebhookConfig) error
 // GetWebhookConfig retrieves a webhook configuration by ID
 func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error) {
 	config := &types.WebhookConfig{}
+	var voiceOnly bool
 	err := store.db.QueryRow(
-		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at 
+		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
+		        auto_download, auto_download_voice_only
 		 FROM webhook_configs WHERE id = ?`, id,
 	).Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
-		&config.Enabled, &config.CreatedAt, &config.UpdatedAt)
+		&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
+		&config.AutoDownload, &voiceOnly)
 
 	if err != nil {
 		return nil, err
 	}
+	config.AutoDownloadVoiceOnly = &voiceOnly
 
 	// Load triggers
 	config.Triggers, err = store.GetWebhookTriggers(id)
@@ -59,7 +64,8 @@ func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error
 // GetAllWebhookConfigs retrieves all webhook configurations
 func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error) {
 	rows, err := store.db.Query(
-		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at 
+		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
+		        auto_download, auto_download_voice_only
 		 FROM webhook_configs ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -67,12 +73,15 @@ func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error
 	var configs []*types.WebhookConfig
 	for rows.Next() {
 		config := &types.WebhookConfig{}
+		var voiceOnly bool
 		err := rows.Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
-			&config.Enabled, &config.CreatedAt, &config.UpdatedAt)
+			&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
+			&config.AutoDownload, &voiceOnly)
 		if err != nil {
 			rows.Close()
 			return nil, err
 		}
+		config.AutoDownloadVoiceOnly = &voiceOnly
 		configs = append(configs, config)
 	}
 	rows.Close()
@@ -101,9 +110,11 @@ func (store *MessageStore) UpdateWebhookConfig(config *types.WebhookConfig) erro
 
 	// Update the main webhook configuration
 	result, err := tx.Exec(
-		`UPDATE webhook_configs SET name = ?, webhook_url = ?, secret_token = ?, 
-		 enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		config.Name, config.WebhookURL, config.SecretToken, config.Enabled, config.ID,
+		`UPDATE webhook_configs SET name = ?, webhook_url = ?, secret_token = ?,
+		 enabled = ?, auto_download = ?, auto_download_voice_only = ?,
+		 updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
+		config.AutoDownload, config.VoiceOnly(), config.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update webhook config: %v", err)

@@ -18,7 +18,15 @@ services:
       # name is what the MCP server and other services on whatsapp_internal can reach;
       # localhost would only have worked inside the bridge container itself.
       - PUBLIC_BASE_URL=http://whatsapp-mcp-whatsapp-bridge-1:8080
+      # Auto-download pool. Which chats are captured is not set here: a listener is a
+      # webhook config with auto_download on, managed in the UI. AUTO_DOWNLOAD=off is a
+      # kill switch for the pool that leaves every rule untouched.
+      - AUTO_DOWNLOAD=on
+      - AUTO_DOWNLOAD_WORKERS=2
     restart: unless-stopped
+    # Shutdown drains the auto-download queue and closes the databases after whatsmeow
+    # disconnects; the default 10s can cut that short (AUDIO_DOWNLOAD_PLAN.md §4.5).
+    stop_grace_period: 30s
     healthcheck:
       # Probes the bridge HTTP port; a non-responsive process gets marked unhealthy
       test: ["CMD", "curl", "-f", "-s", "-X", "OPTIONS", "http://localhost:8080/api/send"]

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"whatsapp-bridge/internal/autodownload"
 	"whatsapp-bridge/internal/database"
 	"whatsapp-bridge/internal/types"
 	"whatsapp-bridge/internal/whatsapp"
@@ -15,14 +16,21 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
+// AutoDownloader receives the media of matched messages. It is satisfied by
+// *autodownload.Manager; the interface keeps the webhook manager testable on its own.
+type AutoDownloader interface {
+	Enqueue(job autodownload.Job) bool
+}
+
 // Manager handles webhook processing and delivery
 type Manager struct {
-	messageStore  *database.MessageStore
-	logger        waLog.Logger
-	configs       []*types.WebhookConfig
-	mutex         sync.RWMutex
-	delivery      *DeliveryService
-	publicBaseURL string
+	messageStore   *database.MessageStore
+	logger         waLog.Logger
+	configs        []*types.WebhookConfig
+	mutex          sync.RWMutex
+	delivery       *DeliveryService
+	publicBaseURL  string
+	autoDownloader AutoDownloader
 }
 
 // NewManager creates a new webhook manager. publicBaseURL is the address webhook
@@ -38,6 +46,14 @@ func NewManager(messageStore *database.MessageStore, logger waLog.Logger, public
 		delivery:      NewDeliveryService(messageStore, logger),
 		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 	}
+}
+
+// SetAutoDownloader attaches the auto-download pool. Left unset (or set to nil), configs
+// with auto_download on still match and deliver; nothing is captured.
+func (wm *Manager) SetAutoDownloader(ad AutoDownloader) {
+	wm.mutex.Lock()
+	defer wm.mutex.Unlock()
+	wm.autoDownloader = ad
 }
 
 // LoadWebhookConfigs loads webhook configurations from database
@@ -179,6 +195,10 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 	media := whatsapp.ExtractMediaInfo(msg.Message, msg.Info.ID)
 	mediaType, filename := media.MediaType, media.Filename
 
+	// Capture the media for any matched listener that asks for it. This runs on the
+	// whatsmeow event path, so it only ever queues (§4.5) — never downloads.
+	wm.enqueueAutoDownloads(msg, media, matchedConfigs)
+
 	// Determine sender name
 	senderName := msg.Info.Sender.User
 	// Note: We'll need to handle contact lookup when integrating with the client
@@ -233,6 +253,11 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 
 	// Send webhooks for each matched configuration
 	for _, config := range matchedConfigs {
+		// A listener with auto-download on and no URL captures the media and posts nowhere.
+		if config.WebhookURL == "" {
+			continue
+		}
+
 		// Find the specific trigger that matched
 		var matchedTrigger *types.WebhookTrigger
 		content := whatsapp.ExtractTextContent(msg.Message)
@@ -264,5 +289,45 @@ func (wm *Manager) ProcessMessage(client interface{}, msg *events.Message, chatN
 
 		// Send webhook asynchronously
 		go wm.delivery.DeliverWebhook(config, &payload, msg.Info.ID, msg.Info.Chat.String(), matchedTrigger)
+	}
+}
+
+// enqueueAutoDownloads queues the matched message's media for every listener that asked for
+// it. The triggers decide who is captured; these flags decide what:
+//
+//	audio ∧ (¬voiceOnly ∨ is_ptt) ∧ (url ∨ direct_path present)
+//
+// so a sender or keyword trigger that also matches text messages costs nothing here, and
+// view-once audio — deliberately stored without url, key or direct path (§2.11) — is never
+// queued for a download that could only fail.
+func (wm *Manager) enqueueAutoDownloads(msg *events.Message, media types.MediaMetadata, matched []*types.WebhookConfig) {
+	wm.mutex.RLock()
+	downloader := wm.autoDownloader
+	wm.mutex.RUnlock()
+
+	if downloader == nil || media.MediaType != "audio" {
+		return
+	}
+	if media.URL == "" && media.DirectPath == "" {
+		return
+	}
+
+	for _, config := range matched {
+		if !config.AutoDownload {
+			continue
+		}
+		if config.VoiceOnly() && !media.IsPTT {
+			continue
+		}
+
+		// One job per message: the first listener that wants it queues it, and the pool
+		// drops a duplicate anyway. Attribution is that listener.
+		downloader.Enqueue(autodownload.Job{
+			MessageID: msg.Info.ID,
+			ChatJID:   msg.Info.Chat.String(),
+			RuleID:    config.ID,
+			RuleName:  config.Name,
+		})
+		return
 	}
 }

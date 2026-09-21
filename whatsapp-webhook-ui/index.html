@@ -56,8 +56,11 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="webhookURL">Webhook URL *</label>
-                    <input type="url" id="webhookURL" name="webhook_url" required>
+                    <label for="webhookURL" id="webhookURLLabel">Webhook URL *</label>
+                    <input type="url" id="webhookURL" name="webhook_url">
+                    <small class="field-hint" id="webhookURLHint" style="display: none;">
+                        Optional with auto-download on: leave it empty to only capture the media.
+                    </small>
                 </div>
 
                 <div class="form-group">
@@ -71,6 +74,28 @@
                         <span class="checkmark"></span>
                         Enable webhook
                     </label>
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="autoDownload" name="auto_download">
+                        <span class="checkmark"></span>
+                        Auto-download matched media
+                    </label>
+                    <small class="field-hint">
+                        Audio from matching messages is downloaded as it arrives, before the CDN link expires.
+                    </small>
+                </div>
+
+                <div class="form-group checkbox-group" id="voiceOnlyGroup" style="display: none;">
+                    <label>
+                        <input type="checkbox" id="autoDownloadVoiceOnly" name="auto_download_voice_only" checked>
+                        <span class="checkmark"></span>
+                        Voice notes only
+                    </label>
+                    <small class="field-hint">
+                        Off also captures forwarded music and attached audio files.
+                    </small>
                 </div>
 
                 <div class="form-group">
@@ -128,6 +153,9 @@
                 <div class="webhook-info">
                     <h3 class="webhook-name"></h3>
                     <span class="webhook-status"></span>
+                    <span class="webhook-autodownload" style="display: none;">
+                        <i class="fas fa-download"></i> Auto-download
+                    </span>
                 </div>
                 <div class="webhook-actions">
                     <button class="btn-action btn-test" title="Test webhook">

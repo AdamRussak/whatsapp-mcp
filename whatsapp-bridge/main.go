@@ -11,6 +11,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"whatsapp-bridge/internal/api"
+	"whatsapp-bridge/internal/autodownload"
 	"whatsapp-bridge/internal/config"
 	"whatsapp-bridge/internal/database"
 	"whatsapp-bridge/internal/webhook"
@@ -71,6 +72,27 @@ func main() {
 		return
 	}
 
+	// Auto-download: listeners are webhook configs with auto_download on, so the pool needs
+	// no rules of its own — only a way to fetch. SkipMediaRetry is deliberate: live media is
+	// seconds old and downloads directly, and it guarantees no retry receipt ever reaches a
+	// phone for an item that arrives here (AUDIO_DOWNLOAD_PLAN.md §2.13, B1).
+	var autoDownloader *autodownload.Manager
+	if cfg.AutoDownloadEnabled {
+		autoDownloader = autodownload.NewManager(
+			voiceDownloader{client: client, mediaStore: mediaStore, messageStore: messageStore, storeDir: cfg.StoreDir},
+			logger,
+			autodownload.Options{
+				Workers:   cfg.AutoDownloadWorkers,
+				QueueSize: cfg.AutoDownloadQueueSize,
+				Timeout:   time.Duration(cfg.AutoDownloadTimeoutS) * time.Second,
+			},
+		)
+		autoDownloader.Start()
+		webhookManager.SetAutoDownloader(autoDownloader)
+	} else {
+		logger.Infof("Auto-download disabled (AUTO_DOWNLOAD=off); webhook rules still match and deliver")
+	}
+
 	// Setup event handling for messages, history sync, and media retry
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -113,6 +135,33 @@ func main() {
 	<-exitChan
 
 	fmt.Println("Disconnecting...")
+	// Shut the auto-download pool down before the client goes away: its workers download
+	// over that same connection. Stop lets what is already downloading finish and drops
+	// what is merely queued; stop_grace_period in docker-compose.yaml is what gives it
+	// the room to do that instead of being SIGKILLed mid-file.
+	if autoDownloader != nil {
+		autoDownloader.Stop()
+	}
 	// Disconnect client
 	client.Disconnect()
+}
+
+// voiceDownloader adapts the WhatsApp client to autodownload.Downloader, binding the stores
+// and the store directory the pool would otherwise have to know about.
+type voiceDownloader struct {
+	client       *whatsapp.Client
+	mediaStore   *database.MediaStore
+	messageStore *database.MessageStore
+	storeDir     string
+}
+
+func (d voiceDownloader) DownloadVoice(ctx context.Context, messageID, chatJID string) (string, bool, error) {
+	res, err := d.client.DownloadMediaWithOptions(
+		ctx, d.mediaStore, d.messageStore, messageID, chatJID, d.storeDir,
+		whatsapp.DownloadOptions{SkipMediaRetry: true},
+	)
+	if err != nil {
+		return "", false, err
+	}
+	return res.Path, res.Cached, nil
 }

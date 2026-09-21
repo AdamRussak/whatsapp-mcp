@@ -32,7 +32,12 @@ type MediaMetadata struct {
 	IsPTT      bool // true for a voice note, false for an attached audio file
 }
 
-// WebhookConfig represents a webhook configuration
+// WebhookConfig represents a webhook configuration.
+//
+// A config is a listener: its triggers decide which messages it matches, and its actions
+// decide what happens to them. Delivering an HTTP webhook is one action; auto-downloading
+// the matched media is another (schema v2). A config may do either or both, so WebhookURL
+// is optional when AutoDownload is on.
 type WebhookConfig struct {
 	ID          int              `json:"id"`
 	Name        string           `json:"name"`
@@ -42,6 +47,18 @@ type WebhookConfig struct {
 	CreatedAt   time.Time        `json:"created_at"`
 	UpdatedAt   time.Time        `json:"updated_at"`
 	Triggers    []WebhookTrigger `json:"triggers"`
+
+	// AutoDownload makes a matched audio message download as it arrives.
+	AutoDownload bool `json:"auto_download"`
+	// AutoDownloadVoiceOnly restricts that to voice notes (is_ptt). It is a pointer so an
+	// absent JSON field means "true" — the column default — rather than "download all audio".
+	AutoDownloadVoiceOnly *bool `json:"auto_download_voice_only"`
+}
+
+// VoiceOnly reports whether auto-download is restricted to voice notes, defaulting to true
+// when the field was never set.
+func (c *WebhookConfig) VoiceOnly() bool {
+	return c.AutoDownloadVoiceOnly == nil || *c.AutoDownloadVoiceOnly
 }
 
 // WebhookTrigger represents a trigger condition for webhooks

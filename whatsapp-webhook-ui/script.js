@@ -55,6 +55,9 @@ class WebhookManager {
         // Form submission
         document.getElementById('webhookForm').addEventListener('submit', (e) => this.handleFormSubmit(e));
 
+        // Auto-download reveals the voice-only choice and waives the URL requirement
+        document.getElementById('autoDownload').addEventListener('change', () => this.syncAutoDownloadFields());
+
         // Add trigger button
         document.getElementById('addTriggerBtn').addEventListener('click', () => this.addTriggerRow());
 
@@ -143,7 +146,16 @@ class WebhookManager {
         
         // Fill in the data
         clone.querySelector('.webhook-name').textContent = webhook.name;
-        clone.querySelector('.webhook-url').textContent = webhook.webhook_url;
+        clone.querySelector('.webhook-url').textContent = webhook.webhook_url || '— (download-only listener)';
+
+        // Auto-download badge
+        const autoDownloadBadge = clone.querySelector('.webhook-autodownload');
+        if (webhook.auto_download) {
+            autoDownloadBadge.style.display = '';
+            autoDownloadBadge.title = webhook.auto_download_voice_only === false
+                ? 'Downloads all audio from matching messages'
+                : 'Downloads voice notes from matching messages';
+        }
         clone.querySelector('.webhook-created').textContent = this.formatDate(webhook.created_at);
         
         // Status
@@ -219,6 +231,9 @@ class WebhookManager {
     resetForm() {
         document.getElementById('webhookForm').reset();
         document.getElementById('webhookEnabled').checked = true;
+        document.getElementById('autoDownload').checked = false;
+        document.getElementById('autoDownloadVoiceOnly').checked = true;
+        this.syncAutoDownloadFields();
         
         // Reset triggers to one default row
         const container = document.getElementById('triggersContainer');
@@ -245,11 +260,23 @@ class WebhookManager {
         this.setupTriggerRowListeners(container.querySelector('.trigger-item'));
     }
 
+    // syncAutoDownloadFields keeps the form honest about what auto-download changes: the
+    // voice-only choice only exists when it is on, and the URL stops being mandatory.
+    syncAutoDownloadFields() {
+        const on = document.getElementById('autoDownload').checked;
+        document.getElementById('voiceOnlyGroup').style.display = on ? '' : 'none';
+        document.getElementById('webhookURLLabel').textContent = on ? 'Webhook URL' : 'Webhook URL *';
+        document.getElementById('webhookURLHint').style.display = on ? '' : 'none';
+    }
+
     populateForm(webhook) {
         document.getElementById('webhookName').value = webhook.name;
-        document.getElementById('webhookURL').value = webhook.webhook_url;
+        document.getElementById('webhookURL').value = webhook.webhook_url || '';
         document.getElementById('secretToken').value = webhook.secret_token || '';
         document.getElementById('webhookEnabled').checked = webhook.enabled;
+        document.getElementById('autoDownload').checked = !!webhook.auto_download;
+        document.getElementById('autoDownloadVoiceOnly').checked = webhook.auto_download_voice_only !== false;
+        this.syncAutoDownloadFields();
         
         // Populate triggers
         const container = document.getElementById('triggersContainer');
@@ -341,6 +368,8 @@ class WebhookManager {
             webhook_url: formData.get('webhook_url')?.trim(),
             secret_token: formData.get('secret_token')?.trim() || '',
             enabled: document.getElementById('webhookEnabled').checked,
+            auto_download: document.getElementById('autoDownload').checked,
+            auto_download_voice_only: document.getElementById('autoDownloadVoiceOnly').checked,
             triggers: this.collectTriggers()
         };
         
@@ -350,16 +379,19 @@ class WebhookManager {
             return;
         }
         
-        if (!webhook.webhook_url) {
-            this.showToast('Webhook URL is required', 'error');
+        // A listener that only auto-downloads posts nowhere, so it needs no URL.
+        if (!webhook.webhook_url && !webhook.auto_download) {
+            this.showToast('Webhook URL is required unless auto-download is enabled', 'error');
             return;
         }
         
-        try {
-            new URL(webhook.webhook_url);
-        } catch (error) {
-            this.showToast('Please enter a valid webhook URL', 'error');
-            return;
+        if (webhook.webhook_url) {
+            try {
+                new URL(webhook.webhook_url);
+            } catch (error) {
+                this.showToast('Please enter a valid webhook URL', 'error');
+                return;
+            }
         }
         
         if (webhook.triggers.length === 0) {

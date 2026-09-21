@@ -190,6 +190,25 @@ header p {
     color: var(--error-color);
 }
 
+/* Marks a listener that captures matched media, alongside the enabled/disabled status */
+.webhook-autodownload {
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background-color: rgba(18, 140, 126, 0.1);
+    color: var(--secondary-color);
+}
+
+/* Explanatory line under a form field */
+.field-hint {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
 .webhook-actions {
     display: flex;
     gap: 5px;

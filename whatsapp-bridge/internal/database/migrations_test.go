@@ -299,3 +299,92 @@ func TestStoreMessageWritesV1Columns(t *testing.T) {
 		t.Errorf("text message: is_ptt IS NULL = %v, seconds IS NULL = %v; want both true", isPTTNull, secondsNull)
 	}
 }
+
+// oldWebhookSchema is webhook_configs as it looked before schema v2: no auto-download
+// columns. Its rows are live configuration, so the migration must leave them exactly as
+// they are and only widen the table.
+const oldWebhookSchema = `
+	CREATE TABLE webhook_configs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		webhook_url TEXT NOT NULL,
+		secret_token TEXT,
+		enabled BOOLEAN DEFAULT 1,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+`
+
+// TestMigrationV2AddsAutoDownloadColumns checks the schema-v2 half of §4.6 step 6: an
+// existing webhook keeps working untouched, and defaults to capturing nothing.
+func TestMigrationV2AddsAutoDownloadColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "messages.db")
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(oldSchema + oldWebhookSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled)
+		VALUES (?, ?, ?, ?)`, "existing", "https://example.com/hook", "s3cret", true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+
+	var name, url, token string
+	var enabled, autoDownload, voiceOnly bool
+	err = db.QueryRow(`SELECT name, webhook_url, secret_token, enabled, auto_download, auto_download_voice_only
+		FROM webhook_configs WHERE id = 1`).Scan(&name, &url, &token, &enabled, &autoDownload, &voiceOnly)
+	if err != nil {
+		t.Fatalf("reading the migrated row: %v", err)
+	}
+	if name != "existing" || url != "https://example.com/hook" || token != "s3cret" || !enabled {
+		t.Fatalf("the migration rewrote an existing webhook: %q %q %q %v", name, url, token, enabled)
+	}
+	// An existing webhook must not start downloading anything on its own.
+	if autoDownload {
+		t.Error("auto_download defaulted to on for an existing webhook")
+	}
+	if !voiceOnly {
+		t.Error("auto_download_voice_only defaulted to off, so enabling capture would take all audio")
+	}
+
+	// Re-opening applies nothing further.
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("second runMigrations: %v", err)
+	}
+	var version int
+	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version = %d, want 2", version)
+	}
+	db.Close()
+}
+
+// createTables carries the v2 columns too, so a fresh database needs no ALTER at all.
+func TestFreshDatabaseHasAutoDownloadColumns(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var count int
+	err = store.GetDB().QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('webhook_configs')
+		 WHERE name IN ('auto_download', 'auto_download_voice_only')`).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("fresh webhook_configs has %d of the 2 auto-download columns", count)
+	}
+}

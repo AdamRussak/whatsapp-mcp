@@ -56,9 +56,14 @@ constructor() {
 1. Click the **"Add Webhook"** button
 2. Fill in the webhook details:
    - **Name**: A descriptive name for your webhook
-   - **Webhook URL**: The endpoint that will receive webhook notifications
+   - **Webhook URL**: The endpoint that will receive webhook notifications. Optional when
+     auto-download is on — leave it empty for a listener that only captures media
    - **Secret Token**: (Optional) Security token for webhook validation
    - **Enabled**: Whether the webhook should be active
+   - **Auto-download matched media**: Download audio from matching messages as it arrives,
+     before the WhatsApp CDN link expires (~11–19 days)
+   - **Voice notes only**: Shown when auto-download is on. Off also captures forwarded
+     music and attached audio files
 3. Configure triggers:
    - **All Messages**: Trigger on every message
    - **Specific Chat**: Trigger for messages from a specific chat JID
@@ -76,6 +81,22 @@ Each webhook card provides action buttons:
 - **✏️ Edit**: Modify webhook configuration
 - **🔘 Toggle**: Enable or disable the webhook
 - **🗑️ Delete**: Remove the webhook (with confirmation)
+
+### Auto-download
+
+A webhook entry is a listener: its triggers decide which messages it matches, and its
+actions decide what happens to them. Delivering to a URL is one action; **auto-download**
+is another, and an entry can do either or both.
+
+With auto-download on, a matching audio message is downloaded by the bridge within seconds
+of arriving, into `store/media/<chat>/`, and recorded in `media.db`. This matters because
+WhatsApp's CDN links expire after roughly 11–19 days, after which the media cannot be
+recovered. The triggers choose *who* is captured (a sender, a chat, or everything); the
+voice-notes-only checkbox chooses *what*. A trigger that also matches text messages costs
+nothing — only audio is ever queued.
+
+Rules take effect on the next message; no restart is needed. Operators can stop the pool
+entirely with `AUTO_DOWNLOAD=off` on the bridge, which leaves every rule untouched.
 
 ### Webhook Triggers
 
