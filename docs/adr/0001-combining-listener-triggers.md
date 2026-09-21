@@ -414,7 +414,7 @@ Specifics for this deploy, on top of the checklist:
 ## Implementation log
 
 Implemented 2026-09-21, T1–T6 in the order above, then corrected after
-[the review](0001-combining-listener-triggers-review.md) (see [Review follow-up](#review-follow-up)).
+[the review](https://github.com/AdamRussak/whatsapp-mcp/blob/0784307/docs/adr/0001-combining-listener-triggers-review.md) (removed after its fixes landed; kept in history) (see [Review follow-up](#review-follow-up)).
 `go test ./...` and `scripts/test-ui.sh` (42 tests) pass. The ADR was re-checked against the
 code afterwards; that pass added the rollback consequence and the T7 specifics above. Deployed
 the same day (T7).
@@ -504,7 +504,7 @@ counting, the live-listener fixture), `api/webhooks_validate_test.go`, T1 tests 
 
 ### Review follow-up
 
-[The review](0001-combining-listener-triggers-review.md) passed the schema, API, matcher
+[The review](https://github.com/AdamRussak/whatsapp-mcp/blob/0784307/docs/adr/0001-combining-listener-triggers-review.md) passed the schema, API, matcher
 and payload slices, and found two bugs. Neither let an impossible listener save. Both are
 fixed:
 
