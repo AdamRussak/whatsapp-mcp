@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-20:** Milestone 1 and **Phase 0 are complete and deployed.** Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, and B10 is fixed. Next is **Phase 5** (batch by sender) or **Phase 2/3** (MCP tools). One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
+**Status as of 2026-09-21:** Milestone 1 and **Phases 0 and 1 are complete and deployed.** Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Next: see §2.12** — the recommendation is to bring Phase 4 (auto-download) forward, because the CDN window means only newly arriving voice notes can still be captured. One decision still open: re-pairing after S1 (§2.4 step 1) — deferred.
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -22,7 +22,9 @@ Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → 
 
 ## 2. Current state and next steps
 
-### 2.1 Current state (2026-09-20)
+### 2.1 Milestone 1 completion snapshot (2026-09-20)
+
+> Superseded as a "current state" by §2.9–§2.12; kept because it is the evidence for §5.6. Live totals have moved since (see §2.12).
 
 | Check | Result |
 |---|---|
@@ -70,7 +72,7 @@ Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → 
 | B6 ✅ | med | *(fixed: `ChatFolderKey` + per-chat cache; batch response returns `folder`)* Folder key is computed three different ways (`resolveTargetFolder`, `runBatchDownload`, `tr -cd` in the shell script). For an unmapped `@lid` or a group, `index.json` / the script's "Index file" line point at the wrong folder. `ResolveChatJIDs` also opens `whatsapp.db` once per message (~4,000× per batch). | `download.go`, `handlers.go`, `tests/download-chat-audio.sh` |
 | B7 ✅ | med | *(fixed: removed; every message goes through `HandleMessage` again)* Placeholder-resend hack (out of scope): sends a `BuildUnavailableMessageRequest` peer message to the phone for **every** retried item, and `HandlePlaceholderMessage` swallows any matching `events.Message` so it is never stored or sent to webhooks (even when the channel is full). It has never fired (0 in logs). | `download.go`, `client.go`, `main.go` |
 | B8 ✅ | low | *(fixed: `NormalizeTimeFilter`; invalid → 400)* `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
-| B9 | low | `MediaDownloader` is unused. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` flags only pre-existing files (`types.go`, `whatsapp/handlers.go`, two tests); new/changed files are formatted. Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
+| B9 | low | `MediaDownloader` (`media.go`) is still unused — nothing constructs it. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` now flags only `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go` (`types.go` and `whatsapp/handlers.go` were formatted in Phase 1). Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
 | B10 ✅ | low | *(fixed in Phase 1, §2.11)* `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
 ### 2.4 Next steps (in order)
@@ -90,7 +92,7 @@ Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → 
 5. ✅ **Fix B6, B8** (B4, B7 were done in step 4). See §2.7: one folder-key function, returned in the batch response; `after`/`before` normalised to the stored format.
 6. ✅ **Missing tests**: LID expansion, cache hit, retry waiter (fake `events.MediaRetry`), "no writes to `messages`". See §2.8.
 7. ✅ **Execute §5.5**: baseline (stop, back up, `integrity_check`, dump the chat's rows) → live run on `972523996302` with full history (rehearsal skipped per decision, unavailable audio marked failed without blocking on retry timeouts) → after-run diff. Verified: `diff` is empty, 106 `.ogg` files saved, `media.db` and `index.json` cover all 4,062 items, re-run skipped 4062/4062. Definition of done §5.6 100% met.
-8. **Next: Phase 0** (pin `mcp[cli]<2` first — cheapest, prevents a broken rebuild).
+8. ✅ **Phase 0** (§2.10) and ✅ **Phase 1** (§2.11) are done and deployed. Next step: §2.12.
 
 ### 2.5 B1 investigation (2026-09-19, 14:58–15:03 UTC)
 
@@ -240,6 +242,43 @@ Checked before trusting it: the protobuf's `direct_path` **does** carry the `ccb
 
 Verified live: one downloaded voice note was moved aside and re-fetched through `POST /api/download` → `cached: false` (a real download, not the cache), 9,360 bytes, **SHA-256 identical** to the original, valid `OggS`, and **0 media retries**. `GetMediaInfo` selects the new column; `MediaInfo.DirectPath` carries it. Suite is 40 tests.
 
+### 2.12 Where things stand, and what to do next (2026-09-21)
+
+**Live state, measured:**
+
+| Check | Value |
+|---|---|
+| Deployed | whatsmeow `20260917111002`, Go 1.26, `messages.db` schema **v1**, `whatsmeow_version` `15\|8` |
+| `messages.db` | 476,887 messages · 9,876 audio rows · 3 rows tagged `is_ptt` (all since the v1 deploy) |
+| `media.db` | `ok` **114** · `rekeyed_on_phone` 339 · `expired_not_on_phone` 1 · `failed` 3,619 · `retry_timeout` 1 |
+| Files | `972523996302/` 110 · `972547669192/` 3 · `972523531857-1556783116_g_us/` 1 · `972527872233/` 11 (standalone script) |
+| Bridge suite | 40 tests, `go vet` clean |
+| Rollback tags | `whatsapp-bridge:pre-m1`, `:pre-phase0`, `:pre-phase1`, `:pre-directpath` |
+
+**The finding that should drive the next step.** Milestone 1 captured one contact. Meanwhile every other chat keeps producing voice notes, and the CDN window is 11–19 days (§2.5), after which B1 makes them unrecoverable for good. Counting audio from the last 14 days that is still inside that window:
+
+| | |
+|---|---|
+| Audio messages in the last 14 days | 268 |
+| Already downloaded (`ok`) | 104 |
+| **Still downloadable, not captured** | **164, across 35 chats** |
+| Rate | ~19 audio messages/day |
+
+Those 164 are recoverable today and will not be recoverable next week. 3,619 items are already past saving. **The archive is leaking at roughly 19 items a day, and nothing currently stops it.**
+
+**Proposed next step — two parts:**
+
+**A. Sweep the backlog now (no new code).** Loop the existing batch endpoint over the 35 chats with uncaptured recent audio, `skip_media_retry=true` so no expired item pesters a phone. Everything it needs already works and is proven: LID expansion, folder keys, idempotent re-runs, explicit per-item status. Expect most of the 164 to land directly. This is hours of value for minutes of work, and it is time-sensitive.
+
+**B. Then Phase 4 (auto-download, goal G2) — brought forward, sliced.** This is the only change that stops the leak permanently, which is why it should come before Phases 5 and 2/3:
+
+- **4a — capture, no schema.** `AUTO_DOWNLOAD_VOICE=none|all|rules` plus an allowlist in config; a small worker pool fed from `HandleMessage` *after* the message is stored (never inside the whatsmeow event handler, §4.5); each job calls the existing `DownloadMedia`. No migration, no API, no UI. That alone secures every new voice note.
+- **4b — rules and control.** Schema v2 (`auto_download_rules`, `auto_download_triggers`, `auto_download_logs`), `matchesTrigger` moved to `internal/matcher` and shared with webhooks, the REST endpoints, the UI tab and the MCP tools.
+
+**Why this re-orders the documented plan.** Phase 5's history request is explicitly low-payoff: B1 means resent history most likely comes back re-keyed (§2.5 option 2). Phase 2/3 is ergonomics over a capability that already works through the API. Neither stops the leak; 4a does, and it is smaller than either.
+
+**Cheap parity fix worth folding in wherever it lands:** the MCP tool `batch_download_chat_audio` still exposes only `chat`, `limit`, `skip_cached`, `retry_failed`, so `media_type`/`voice`, `after`, `before` and `skip_media_retry` are unreachable from the MCP side (§5.2).
+
 ---
 
 ## 3. Background
@@ -262,17 +301,17 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 
 ### 3.2 Findings (original analysis, updated)
 
-1. **`/api/download` was missing** after the refactor in `fe89097` (upstream `0487e16` had it). ✅ Restored in Milestone 1. `webhook/manager.go` still advertises `http://localhost:8080/api/download` (B10).
-2. **Decryption material is stored** for 9,845 of 9,847 audio rows (`url`, 32-byte `media_key`, `file_sha256`, `file_enc_sha256`, `file_length`). Not stored: `direct_path`, `mimetype`, `seconds`, the **`ptt` flag**. The direct path is recoverable from `url` **including its query string** (S2 — the original upstream extraction was wrong). `ExtractMediaInfo` names files from `time.Now()`, so replays get new names.
+1. **`/api/download` was missing** after the refactor in `fe89097` (upstream `0487e16` had it). ✅ Restored in Milestone 1. ✅ `webhook/manager.go` now builds the URL from `PUBLIC_BASE_URL` (B10 fixed, §2.11).
+2. **Decryption material is stored** for 9,845 of 9,847 audio rows (`url`, 32-byte `media_key`, `file_sha256`, `file_enc_sha256`, `file_length`). ✅ Since schema v1 (§2.11) new audio rows also store `direct_path`, `mimetype`, `seconds` and the **`ptt` flag**; rows predating v1 have those NULL and still have the direct path recovered from `url` **including its query string** (S2 — the original upstream extraction was wrong). ✅ Audio files are now named `voice_<msgID>.ogg` / `audio_<msgID>.ogg` instead of from `time.Now()`.
 3. **No audio filter / batch** in the MCP layer. Batch now exists in the bridge; `list_messages` still has no `media_type` filter.
 4. **CDN links expire** (~1–2 weeks in practice; the `oe=` value is not reliable either way). Recovery is whatsmeow's media retry: `SendMediaRetryReceipt` → `events.MediaRetry` with a fresh direct path. Needs the sender's phone online and still holding the file. In practice the re-upload uses a new key we don't receive (B1, §2.5), so retry doesn't recover anything today.
 5. **Format:** voice notes are Opus in Ogg, mono, ~16 kbps. The MCP container has ffmpeg.
 6. **One contact = two chat JIDs.** 1:1 chats moved to LID addressing; the phone-number chat stops around 2026-07-19 and the `@lid` chat continues. "All voice notes from X" must union both via `whatsmeow_lid_map` (19,241 rows). ✅ `ResolveChatJIDs`.
 7. **Old rows can't tell voice notes from audio files** (no `ptt`). Milestone 1 downloads all audio; nearly all 1:1 audio is voice notes anyway.
-8. **Stored filenames collide** (second resolution). Downloaded files are named by timestamp + direction + message ID; the `filename` column is never used or changed.
+8. **Stored filenames collided** (second resolution). ✅ Fixed for audio in schema v1 (named from the message ID); image/video/document still use `time.Now()`. Downloaded files on disk are named by timestamp + direction + message ID; the `filename` column is never used or changed.
 9. **About half of each chat is `from_me`.** Their media retry goes to your own phone.
 10. **Webhook trigger model to reuse for G2:** `WebhookTrigger{TriggerType: chat_jid|sender|keyword|media_type|all, TriggerValue, MatchType: exact|contains|regex}`, matched by `Manager.matchesTrigger`.
-11. **whatsmeow:** pinned `v0.0.0-20260718134955-fac667d55293` (Go 1.25). Target `v0.0.0-20260917111002-2e338d0ee73d` (Go 1.26) has retry/ack fixes and new protobufs. Relevant APIs: `DownloadMediaWithPath(ctx, directPath, encSHA256, sha256, mediaKey, mediaType, mmsType, allowNoHash)` (verifies the ciphertext hash when `encSHA256` is set — the cause of B1's error), `DownloadToFile`, `SendMediaRetryReceipt`, `DecryptMediaRetryNotification`, `BuildHistorySyncRequest`.
+11. **whatsmeow:** ✅ now on `v0.0.0-20260917111002-2e338d0ee73d` with Go 1.26 (§2.10); was `v0.0.0-20260718134955-fac667d55293`. Relevant APIs: `DownloadMediaWithPath(ctx, directPath, encSHA256, sha256, mediaKey, mediaType, mmsType, allowNoHash)` (verifies the ciphertext hash when `encSHA256` is set — the cause of B1's error), `DownloadToFile`, `SendMediaRetryReceipt`, `DecryptMediaRetryNotification`, `BuildHistorySyncRequest`.
 
 ### 3.3 Inventory (read-only, 2026-09-19)
 
@@ -384,7 +423,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 | `ResolveChatJIDs` (phone / `@s.whatsapp.net` / `@lid` / `@g.us`) | `internal/whatsapp/lid.go` | ✅ tested (`lid_test.go`) |
 | `POST /api/download`, `POST /api/download/batch` (202 + job), `GET`/`DELETE /api/download/batch/{id}`, `GET /api/media/{chat}/{file}` | `internal/api/handlers.go`, `server.go` | ✅ S1, B4 fixed; batch returns `folder` |
 | Python: `_ro()` everywhere, `download_media` path mapping, `start_chat_audio_download`, `get_download_job` | `whatsapp-mcp-server/whatsapp.py` | ✅ |
-| MCP tools `batch_download_chat_audio`, `get_audio_download_progress` | `whatsapp-mcp-server/gradio-main.py` | ✅ |
+| MCP tools `batch_download_chat_audio`, `get_audio_download_progress` | `whatsapp-mcp-server/gradio-main.py` | 🟡 present, but behind the bridge: the tool exposes only `chat`, `limit`, `skip_cached`, `retry_failed` — not `media_type`/`voice`, `after`, `before` or `skip_media_retry` |
 | Helper script (polls every 5 s; `after`/`before` args, `SKIP_MEDIA_RETRY` env) | `whatsapp-bridge/tests/download-chat-audio.sh` | ✅ uses the bridge's `folder` (B6) |
 | Standalone decrypter (not in original plan; reads DBs `mode=ro`, fetches full CDN URL, decrypts locally; no media retry) | `scripts/download_chat_audio.py` | ✅ produced the 11 files in `store/media/972527872233/` |
 | `.gitignore`: `*.db-wal`, `*.db-shm`, `store-test/`, `store/backups/` | `.gitignore` | ✅ |
@@ -410,10 +449,11 @@ Rules: rebuild `MessageInfo` from the row (`from_me` → own JID as sender). One
 ### 5.4 Batch job
 
 ```json
-{ "chat": "972527872233", "after": null, "before": null, "limit": 5000,
+{ "chat": "972527872233", "media_type": "audio", "after": null, "before": null, "limit": 5000,
   "skip_cached": true, "retry_failed": false, "skip_media_retry": false }
 ```
 - `chat` is a phone or any JID; expanded to phone + LID JIDs and echoed as `resolved_jids`.
+- `media_type` is `audio` (default) or `voice` (audio with `is_ptt`, so schema-v1 rows only); anything else → 400.
 - Background job (`202 {job_id, status_url}`), sequential, one worker, `DOWNLOAD_PACE_MS` between items. One job at a time (409). Cancel with `DELETE`.
 - `GET /api/download/batch/{job_id}` → `{status, total, done, failed, skipped, current_message_id, …}`. The start response also returns `resolved_jids` and `folder`. At the end, `store/media/<key>/index.json` is rebuilt with every attempted item of the chat (cumulative across jobs). (Per-item `items` in the GET response: not implemented.)
 - Resumable with `skip_cached=true`.
@@ -521,7 +561,7 @@ Additive, with a constant default, and compat stays 8.
 
 **Deploy checklist when it goes out** (§4.6): `docker compose stop` → back up `messages.db`, `whatsapp.db`, `media.db` + `integrity_check` → tag the running image `whatsapp-bridge:pre-phase0` → `docker compose up -d --build` → confirm the log shows the v14→v15 upgrade, the bridge reconnects without a QR prompt, `whatsmeow_version` reads `15|8`, and `/api/download` still serves a cached item.
 
-### Phase 1 — Live voice-note tagging (schema v1) ✅ (2026-09-20, §2.11)
+### Phase 1 — Live voice-note tagging (schema v1) ✅ (deployed 2026-09-21, §2.11)
 
 Only needed for live `is_ptt` tagging and auto-download; history download does not need it.
 
@@ -573,10 +613,10 @@ Only needed for live `is_ptt` tagging and auto-download; history download does n
 
 ## 7. Risks
 
-- **DB integrity** — §4. The replay-overwrite hazard (§4.3) must be closed before Phase 1 writes download state into `messages`.
+- **DB integrity** — §4. ✅ The replay-overwrite hazard (§4.3) is closed: `StoreMessage` uses `ON CONFLICT … COALESCE` and never rewrites an existing row. Download state was kept out of `messages` entirely (§2.11).
 - **Exposure** — port 8080 is public and unauthenticated; S1 showed what that costs. Bind it to localhost or the Docker network, or add token auth.
 - **Expired media is the norm** for anything older than ~11–19 days, and media retry doesn't recover it today (B1). Report per item, never abort a batch.
-- **MCP SDK v2** — unpinned today (Phase 0).
+- **MCP SDK v2** — ✅ pinned `<2` (§2.10); mcp 2.2.0 is live on PyPI, so the bound is load-bearing.
 - **Rate limits** — one worker, 250 ms pace for history; ≤ 2 workers for auto-download.
 - **Disk** — ~120 KB per minute of voice; add retention before `AUTO_DOWNLOAD_VOICE=all`.
 - **View-once** audio — skip.
