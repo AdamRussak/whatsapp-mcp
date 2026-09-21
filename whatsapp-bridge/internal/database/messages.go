@@ -164,24 +164,29 @@ type MediaInfo struct {
 	FileSHA256    []byte    `json:"-"`
 	FileEncSHA256 []byte    `json:"-"`
 	FileLength    uint64    `json:"file_length"`
+
+	// DirectPath is captured from the protobuf since schema v1 and carries the CDN query
+	// string (ccb/oh/oe/_nc_sid). NULL for rows stored before v1.
+	DirectPath string `json:"direct_path,omitempty"`
 }
 
 // GetMediaInfo retrieves media information for a specific message by ID and chat JID (read-only)
 func (store *MessageStore) GetMediaInfo(id, chatJID string) (*MediaInfo, error) {
 	row := store.db.QueryRow(`
 		SELECT id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url,
-		       media_key, file_sha256, file_enc_sha256, file_length
+		       media_key, file_sha256, file_enc_sha256, file_length, direct_path
 		FROM messages
 		WHERE id = ? AND chat_jid = ?
 	`, id, chatJID)
 
 	var info MediaInfo
-	var sender, content, filename, url sql.NullString
+	var sender, content, filename, url, directPath sql.NullString
 	var fileLength sql.NullInt64
 
 	err := row.Scan(
 		&info.ID, &info.ChatJID, &sender, &content, &info.Timestamp, &info.IsFromMe,
 		&info.MediaType, &filename, &url, &info.MediaKey, &info.FileSHA256, &info.FileEncSHA256, &fileLength,
+		&directPath,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -194,6 +199,7 @@ func (store *MessageStore) GetMediaInfo(id, chatJID string) (*MediaInfo, error) 
 	info.Content = content.String
 	info.Filename = filename.String
 	info.URL = url.String
+	info.DirectPath = directPath.String
 	if fileLength.Valid && fileLength.Int64 > 0 {
 		info.FileLength = uint64(fileLength.Int64)
 	}

@@ -131,6 +131,22 @@ type DownloadOptions struct {
 	SkipMediaRetry bool
 }
 
+// resolveDirectPath picks the CDN path to download from.
+//
+// Schema v1 captures direct_path straight from the protobuf, query string included
+// (ccb/oh/oe/_nc_sid — the auth token whose loss was bug S2), so it needs no parsing and
+// is present even when url is not. Rows stored before v1 have no direct_path and still
+// have it derived from their url.
+func resolveDirectPath(info *database.MediaInfo) string {
+	if info == nil {
+		return ""
+	}
+	if info.DirectPath != "" {
+		return info.DirectPath
+	}
+	return ExtractDirectPathFromURL(info.URL)
+}
+
 // DownloadMedia downloads an audio message, checking cache, downloading from WhatsApp,
 // and triggering media-retry receipts if CDN tokens are expired.
 func (c *Client) DownloadMedia(
@@ -231,7 +247,7 @@ func (c *Client) DownloadMediaWithOptions(
 		return nil, fmt.Errorf("incomplete decryption material for message %s", messageID)
 	}
 
-	directPath := ExtractDirectPathFromURL(info.URL)
+	directPath := resolveDirectPath(info)
 	if directPath == "" {
 		_ = mediaStore.RecordDownload(&database.MediaDownloadRecord{
 			MessageID: messageID,
