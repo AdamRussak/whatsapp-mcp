@@ -2,7 +2,7 @@
 
 Single plan for downloading WhatsApp voice notes and audio: on demand, in bulk from chat history, and automatically for chosen contacts and groups. It replaces the earlier `VOICE_DOWNLOAD_MILESTONE_1.md`, which is now **Milestone 1** below.
 
-**Status as of 2026-09-21:** Milestone 1, **Phases 0 and 1 are complete and deployed**, and the **backlog sweep (§2.13) is complete** (164/164 recent uncaptured audio files recovered with 0 failures). Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Phase 4 (auto-download) deployed 2026-09-21 11:35 UTC** (§2.14, schema v2): a listener is an ordinary webhook entry with `auto_download` ticked, defined in the same UI and the same `POST /api/webhooks` as every event today. The leak is now closed at both ends — the backlog was swept (§2.13) and new voice notes are captured as they arrive. Re-pairing after S1 is not needed: port 8080 has never been publicly reachable (§2.2).
+**Status as of 2026-09-21:** Milestone 1, **Phases 0 and 1 are complete and deployed**, and the **backlog sweep (§2.13) is complete** (164/164 recent uncaptured audio files recovered with 0 failures). Milestone 1: full history batch download executed on `972523996302` / `18674685612157@lid` (4,062 items): 106 recoverable voice notes downloaded as `.ogg` (all valid Opus), everything else recorded with an explicit status in `media.db` and `index.json`, 0 writes to `messages.db`; §5.6 is 100% satisfied. Phase 0: Python deps pinned below MCP 2.x, whatsmeow on `20260917111002` and Go 1.26 live since 2026-09-20 20:26 UTC (§2.10). **Phase 1 (schema v1)** deployed 2026-09-21 07:36 UTC (§2.11): new audio messages are tagged with `is_ptt`, `seconds`, `mimetype` and `direct_path`, downloads use the stored `direct_path`, and B10 is fixed. **Phase 4 (auto-download) deployed 2026-09-21 11:35 UTC** (§2.14, schema v2): a listener is an ordinary webhook entry with `auto_download` ticked, defined in the same UI and the same `POST /api/webhooks` as every event today. The leak is now closed at both ends — the backlog was swept (§2.13) and new voice notes are captured as they arrive. Re-pairing after S1 is not needed: port 8080 has never been publicly reachable (§2.2). **Listener match mode (schema v5) deployed 2026-09-21 21:21 UTC** (§2.19, [ADR 0001](docs/adr/0001-combining-listener-triggers.md)): a listener's triggers combine by OR (the default, unchanged) or AND, and a listener that could never fire is refused with the reason next to the trigger.
 
 Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started · 🐞 known bug
 
@@ -389,7 +389,7 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 | G-b | **The exclusion path is unit-tested, not live-proven** | Every live message since deploy that reached a rule was audio, so "a non-matching message is correctly skipped" has never been demonstrated on real traffic. |
 | G-c | **No chat picker in the UI** | A rule still means typing a phone number or pasting a group JID. B11 made phone numbers work; it did not make them discoverable. Planned as §6 Phase 7.1. |
 | G-d ✅ | **The UI had no tests** | Closed by §6 Phase 7.4: 21 jsdom tests in a `node:22` container, mutation-checked. |
-| G-e | **Rollback was verified by query, not by drill** | The pre-phase4 binary's exact `SELECT`/`INSERT` were run against a v3 copy and work. The old image was never actually booted against a migrated database (§4.6 step 9 remains partly owed). |
+| G-e | **Rollback was verified by query, not by drill** | The pre-phase4 binary's exact `SELECT`/`INSERT` were run against a v3 copy and work. The old image was never actually booted against a migrated database (§4.6 step 9 remains partly owed). The same holds for v5 (§2.19). The reason is structural: the bridge starts its API only after connecting to WhatsApp, so a drill on a copy needs the session, and running a second session from a copy of `whatsapp.db` risks the live one. A real drill needs a way to serve the API without connecting. |
 
 **Later phases, unchanged in scope:** Phase 2 (MCP fallback download, `list_messages(media_type)`, MP3 conversion), Phase 3 (MCP tools and a Gradio tab), Phase 5 (batch by sender; the history request is explicitly low-payoff because of B1), Phase 6 (transcription). Plus the §5.2 parity fix: `batch_download_chat_audio` still exposes only `chat`, `limit`, `skip_cached`, `retry_failed`.
 
@@ -481,6 +481,35 @@ set "Keep captured files for" on a listener, check `GET /api/retention/preview`,
 `RETENTION_DRY_RUN=false` in `docker-compose.yaml` and redeploy with `--force-recreate`.
 
 ---
+
+### 2.19 Listener match mode deployed ✅ (2026-09-21, 21:21 UTC, schema v5)
+
+[ADR 0001](docs/adr/0001-combining-listener-triggers.md) (T1–T7): each listener has a
+`trigger_mode`, `or` (the default, and every existing listener) or `and`. Create and update
+refuse a listener no message could fire (rules R1–R6), and `POST /api/webhooks/validate`
+lets the form show each problem next to its trigger as you type. Payloads gain
+`matched_triggers` and `trigger_mode`; `trigger` is unchanged.
+
+**Deploy.** Full §4.6 checklist:
+- **Rollback images:** tagged `whatsapp-bridge:pre-trigger-mode` and `webhook-ui:pre-trigger-mode`.
+- **Rehearsal:** migration v5 ran on a consistent `.backup` copy with no downtime and exited 0. `quick_check` ok. Every listener and trigger row was byte-identical in the old columns, and all 6 listeners read `or`.
+- **Build:** new images were built while the old containers kept serving.
+- **Stop and backups:** stopped with no journal left; backups
+  `store/backups/{messages,whatsapp,media}_20260921_212113.db`, `integrity_check` ok on each.
+- **Start:** `up -d --build --force-recreate`. The log prints `messages.db schema version 5`, and the running image is the new one.
+- **Live:**
+  - `quick_check` ok.
+  - The first 5 message rows, all 6 listeners and all 6 triggers are byte-identical.
+  - Message count, earliest timestamp, chats (3,936) and nicknames are unchanged from the stopped baseline (477,159 messages).
+  - `smoke.sh` 27/27, including the two new checks: every listener carries `trigger_mode`, and the UI serves `triggerMode`/`triggerSummary`.
+- **Validator on real data:**
+  - Two chats under AND give R3 on row 2.
+  - A phone number and its LID under AND pass, so the live LID map is read.
+  - All 6 stored listeners pass as they are.
+
+**Rollback drill by query (G-e).** The v4 webhook SQL, taken from git, was run against the v5 copy. The v4 `SELECT`s read the table, a v4 `INSERT` gets `or`, and a v4 `UPDATE` leaves an `and` row as `and`. So after a rollback an AND listener behaves as OR, firing on the union, and the setting returns with v5. The copy, which held a duplicate of the session database, was deleted afterwards.
+
+**Found after deploy: an unbumped cache-buster.** `index.html` still requested `script.js?v=9`, and nginx caches `.js` and `.css` for an hour. A browser that had loaded the UI recently could run the old script against the new page, whose trigger list now starts empty: a form with no trigger rows. Fixed within minutes: `script.js?v=10`, `styles.css?v=10` (the stylesheet had no version at all), UI container redeployed alone, and `smoke.sh` 27/27 again. §4.6 step 6b now says to bump both.
 
 ## 3. Background
 
@@ -586,7 +615,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 | 4 | rehearse on `store-test` | `migration vN applied`, exit 0 |
 | 5 | on the copy: `PRAGMA quick_check` + step-3 queries | `ok`, identical |
 | 6 | spot-check 5 old rows before/after | byte-identical |
-| 6b | UI changes only: `./scripts/test-ui.sh` | `# fail 0` |
+| 6b | UI changes only: `./scripts/test-ui.sh`, **and bump `?v=` on `script.js` and `styles.css` in `index.html`**. nginx caches both for an hour, so an unbumped page can run the old script against the new markup (§2.19) | `# fail 0` |
 | 7 | `docker compose up -d --build --force-recreate` — **always `--force-recreate`**, never plain `--build`. This has now bitten twice (§2.10, §2.15): a stopped or unchanged container is *started*, not replaced, so the freshly built image never runs | healthy, **and the log prints the expected schema version** — that is the proof, not "Built" or "Up/healthy" |
 | 8 | steps 5–6 on live DB (read-only) | same |
 | 8b | `./scripts/smoke.sh` (set `EXPECT_SCHEMA` to the version this deploy lands on) | `0 failed`; this is what proves the new binary and the new UI are the ones actually running |
