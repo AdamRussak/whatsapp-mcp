@@ -654,9 +654,14 @@ class WebhookManager {
         const template = document.getElementById('logEntryTemplate');
         const clone = template.content.cloneNode(true);
         
-        // Determine status based on response_status or delivered_at
+        // An auto-download capture is an action of the same listener, not an HTTP delivery:
+        // it has no status code, and delivered_at carries whether the file landed.
+        const isCapture = log.event_type === 'auto_download';
+
         let status = 'pending';
-        if (log.response_status) {
+        if (isCapture) {
+            status = log.delivered_at ? 'success' : 'error';
+        } else if (log.response_status) {
             status = log.response_status >= 200 && log.response_status < 300 ? 'success' : 'error';
         } else if (log.delivered_at) {
             status = 'success';
@@ -668,7 +673,11 @@ class WebhookManager {
         
         // Fill in the data
         const statusBadge = clone.querySelector('.status-badge');
-        statusBadge.textContent = status.toUpperCase();
+        if (isCapture) {
+            statusBadge.textContent = status === 'success' ? 'CAPTURED' : 'CAPTURE FAILED';
+        } else {
+            statusBadge.textContent = status.toUpperCase();
+        }
         statusBadge.classList.add(status);
         
         clone.querySelector('.log-timestamp').textContent = this.formatDate(log.created_at);
@@ -697,7 +706,18 @@ class WebhookManager {
         
         // Response information
         let responseText = 'N/A';
-        if (log.response_status) {
+        if (isCapture) {
+            responseText = log.response_body || 'N/A';
+            let durationMs = null;
+            try {
+                durationMs = JSON.parse(log.payload || '{}').duration_ms;
+            } catch (e) {
+                durationMs = null;
+            }
+            if (durationMs !== null && durationMs !== undefined) {
+                responseText += ` (${durationMs}ms)`;
+            }
+        } else if (log.response_status) {
             responseText = `HTTP ${log.response_status}`;
             if (log.response_body) {
                 try {

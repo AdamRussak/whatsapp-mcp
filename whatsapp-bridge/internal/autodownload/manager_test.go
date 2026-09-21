@@ -79,7 +79,7 @@ func testLogger() waLog.Logger { return waLog.Noop }
 
 func TestWorkerDownloadsQueuedJob(t *testing.T) {
 	fake := newFakeDownloader(1)
-	m := NewManager(fake, testLogger(), Options{Workers: 1})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1})
 	m.Start()
 	defer m.Stop()
 
@@ -98,7 +98,7 @@ func TestWorkerDownloadsQueuedJob(t *testing.T) {
 func TestWorkerSurvivesDownloadError(t *testing.T) {
 	fake := newFakeDownloader(2)
 	fake.err = context.DeadlineExceeded
-	m := NewManager(fake, testLogger(), Options{Workers: 1})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1})
 	m.Start()
 	defer m.Stop()
 
@@ -115,7 +115,7 @@ func TestWorkerSurvivesDownloadError(t *testing.T) {
 // immediately rather than blocking the handler.
 func TestEnqueueDoesNotBlockWhenQueueIsFull(t *testing.T) {
 	fake := newFakeDownloader(1)
-	m := NewManager(fake, testLogger(), Options{Workers: 1, QueueSize: 1})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1, QueueSize: 1})
 	// Deliberately not started: nothing drains the queue.
 
 	if !m.Enqueue(Job{MessageID: "M1", ChatJID: "c@s.whatsapp.net"}) {
@@ -143,7 +143,7 @@ func TestEnqueueDoesNotBlockWhenQueueIsFull(t *testing.T) {
 // Several listeners can match one message; it must still be downloaded once.
 func TestEnqueueDeduplicatesTheSameMessage(t *testing.T) {
 	fake := newFakeDownloader(1)
-	m := NewManager(fake, testLogger(), Options{Workers: 1, QueueSize: 10})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1, QueueSize: 10})
 
 	first := m.Enqueue(Job{MessageID: "M1", ChatJID: "c@s.whatsapp.net", RuleID: 1})
 	second := m.Enqueue(Job{MessageID: "M1", ChatJID: "c@s.whatsapp.net", RuleID: 2})
@@ -164,7 +164,7 @@ func TestEnqueueDeduplicatesTheSameMessage(t *testing.T) {
 // Once a download finishes, the message is no longer in flight and can be queued again.
 func TestInflightIsReleasedAfterDownload(t *testing.T) {
 	fake := newFakeDownloader(2)
-	m := NewManager(fake, testLogger(), Options{Workers: 1})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1})
 	m.Start()
 	defer m.Stop()
 
@@ -188,7 +188,7 @@ func TestInflightIsReleasedAfterDownload(t *testing.T) {
 func TestWorkerAppliesTimeout(t *testing.T) {
 	fake := newFakeDownloader(1)
 	fake.block = make(chan struct{})
-	m := NewManager(fake, testLogger(), Options{Workers: 1, Timeout: 50 * time.Millisecond})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1, Timeout: 50 * time.Millisecond})
 	m.Start()
 	defer func() {
 		close(fake.block)
@@ -208,10 +208,10 @@ func TestWorkerAppliesTimeout(t *testing.T) {
 
 // Stop must return once the workers are done, and must be safe on a manager never started.
 func TestStopIsSafe(t *testing.T) {
-	m := NewManager(newFakeDownloader(0), testLogger(), Options{})
+	m := NewManager(newFakeDownloader(0), nil, testLogger(), Options{})
 	m.Stop()
 
-	m2 := NewManager(newFakeDownloader(0), testLogger(), Options{Workers: 3})
+	m2 := NewManager(newFakeDownloader(0), nil, testLogger(), Options{Workers: 3})
 	m2.Start()
 	done := make(chan struct{})
 	go func() {
@@ -226,7 +226,7 @@ func TestStopIsSafe(t *testing.T) {
 }
 
 func TestDefaultsAreApplied(t *testing.T) {
-	m := NewManager(newFakeDownloader(0), testLogger(), Options{})
+	m := NewManager(newFakeDownloader(0), nil, testLogger(), Options{})
 	if m.workers != defaultWorkers {
 		t.Errorf("workers = %d, want %d", m.workers, defaultWorkers)
 	}
@@ -243,7 +243,7 @@ func TestDefaultsAreApplied(t *testing.T) {
 func TestStopLetsAnInFlightDownloadFinish(t *testing.T) {
 	fake := newFakeDownloader(1)
 	fake.block = make(chan struct{})
-	m := NewManager(fake, testLogger(), Options{Workers: 1, ShutdownGrace: 2 * time.Second})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1, ShutdownGrace: 2 * time.Second})
 	m.Start()
 
 	m.Enqueue(Job{MessageID: "M1", ChatJID: "c@s.whatsapp.net"})
@@ -285,7 +285,7 @@ func TestStopAbortsAfterGracePeriod(t *testing.T) {
 	fake.block = make(chan struct{})
 	defer close(fake.block)
 
-	m := NewManager(fake, testLogger(), Options{Workers: 1, ShutdownGrace: 100 * time.Millisecond})
+	m := NewManager(fake, nil, testLogger(), Options{Workers: 1, ShutdownGrace: 100 * time.Millisecond})
 	m.Start()
 	m.Enqueue(Job{MessageID: "M1", ChatJID: "c@s.whatsapp.net"})
 	time.Sleep(50 * time.Millisecond)
@@ -311,7 +311,7 @@ func TestStopAbortsAfterGracePeriod(t *testing.T) {
 
 // Once shutdown has begun, nothing new is accepted.
 func TestEnqueueAfterStopIsRefused(t *testing.T) {
-	m := NewManager(newFakeDownloader(0), testLogger(), Options{Workers: 1})
+	m := NewManager(newFakeDownloader(0), nil, testLogger(), Options{Workers: 1})
 	m.Start()
 	m.Stop()
 

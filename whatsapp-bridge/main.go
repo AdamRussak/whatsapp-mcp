@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"whatsapp-bridge/internal/autodownload"
 	"whatsapp-bridge/internal/config"
 	"whatsapp-bridge/internal/database"
+	"whatsapp-bridge/internal/types"
 	"whatsapp-bridge/internal/webhook"
 	"whatsapp-bridge/internal/whatsapp"
 )
@@ -65,7 +67,7 @@ func main() {
 	client.SetMediaRetryTimeout(time.Duration(cfg.MediaRetryTimeoutS) * time.Second)
 
 	// Initialize webhook manager
-	webhookManager := webhook.NewManager(messageStore, logger, cfg.PublicBaseURL)
+	webhookManager := webhook.NewManager(messageStore, logger, cfg.PublicBaseURL, cfg.StoreDir)
 	err = webhookManager.LoadWebhookConfigs()
 	if err != nil {
 		logger.Errorf("Failed to load webhook configs: %v", err)
@@ -80,6 +82,7 @@ func main() {
 	if cfg.AutoDownloadEnabled {
 		autoDownloader = autodownload.NewManager(
 			voiceDownloader{client: client, mediaStore: mediaStore, messageStore: messageStore, storeDir: cfg.StoreDir},
+			captureLogger{store: messageStore},
 			logger,
 			autodownload.Options{
 				Workers:   cfg.AutoDownloadWorkers,
@@ -164,4 +167,50 @@ func (d voiceDownloader) DownloadVoice(ctx context.Context, messageID, chatJID s
 		return "", false, err
 	}
 	return res.Path, res.Cached, nil
+}
+
+// captureLogger writes each auto-download outcome into webhook_logs, next to the delivery
+// logs of the same listener. It reuses that table rather than adding a second one: a
+// capture and a delivery are two actions of one listener, and the UI already has a log view
+// per listener — a download-only listener would otherwise show nothing anywhere.
+type captureLogger struct{ store *database.MessageStore }
+
+func (c captureLogger) RecordCapture(job autodownload.Job, ok bool, detail string, duration time.Duration) {
+	status := "failed"
+	if ok {
+		status = "captured"
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"status":      status,
+		"detail":      detail,
+		"duration_ms": duration.Milliseconds(),
+		"rule":        job.RuleName,
+	})
+	if err != nil {
+		payload = []byte("{}")
+	}
+
+	// delivered_at doubles as the success flag the log view reads; a failure leaves it NULL.
+	var deliveredAt *time.Time
+	if ok {
+		now := time.Now()
+		deliveredAt = &now
+	}
+
+	logErr := c.store.StoreWebhookLog(&types.WebhookLog{
+		WebhookConfigID: job.RuleID,
+		MessageID:       job.MessageID,
+		ChatJID:         job.ChatJID,
+		TriggerType:     job.TriggerType,
+		TriggerValue:    job.TriggerValue,
+		Payload:         string(payload),
+		ResponseBody:    detail,
+		AttemptCount:    1,
+		DeliveredAt:     deliveredAt,
+		EventType:       "auto_download",
+	})
+	if logErr != nil {
+		fmt.Printf("Failed to log auto-download outcome for %s: %v\n", job.MessageID, logErr)
+	}
 }

@@ -48,6 +48,18 @@ var migrations = []migration{
 			})
 		},
 	},
+	{
+		version: 3,
+		name:    "event type on webhook logs",
+		apply: func(tx *sql.Tx) error {
+			// Auto-download outcomes are logged alongside deliveries so the UI's existing
+			// per-listener log view can show them. Existing rows are deliveries, which is
+			// what the default says.
+			return addColumns(tx, "webhook_logs", []column{
+				{"event_type", "TEXT DEFAULT 'delivery'"},
+			})
+		},
+	},
 }
 
 type column struct {

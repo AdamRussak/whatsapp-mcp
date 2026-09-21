@@ -73,7 +73,7 @@ Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ + Phase 5 ← next → 
 | B7 ✅ | med | *(fixed: removed; every message goes through `HandleMessage` again)* Placeholder-resend hack (out of scope): sends a `BuildUnavailableMessageRequest` peer message to the phone for **every** retried item, and `HandlePlaceholderMessage` swallows any matching `events.Message` so it is never stored or sent to webhooks (even when the channel is full). It has never fired (0 in logs). | `download.go`, `client.go`, `main.go` |
 | B8 ✅ | low | *(fixed: `NormalizeTimeFilter`; invalid → 400)* `after`/`before` are compared as text: `2026-01-01T…` vs stored `2026-01-01 …+00:00`, so boundary days are wrong. | `messages.go` `ListAudioMessages` |
 | B9 | low | `MediaDownloader` (`media.go`) is still unused — nothing constructs it. Plaintext SHA-256 check duplicates whatsmeow's. `gofmt -l` now flags only `whatsapp/client_test.go` and `whatsapp/event_handlers_test.go` (`types.go` and `whatsapp/handlers.go` were formatted in Phase 1). Python `download_media` reads the error from `message`; confirm which key `SendJSONError` writes. | various |
-| B11 | med | A `sender` / `chat_jid` trigger typed as a phone number matches nothing: 1:1 chats are LID-addressed now (§3.2 finding 6) and `matchesTrigger` compares raw strings, while `ResolveChatJIDs` is not on that path. Affects webhook delivery as well as auto-download. See §2.14. | `webhook/manager.go` |
+| B11 ✅ | med | *(fixed: `buildTriggerAliases` expands exact `sender`/`chat_jid` values through `whatsmeow_lid_map` at load)* A trigger typed as a phone number matched nothing: 1:1 chats are LID-addressed now (§3.2 finding 6) and `matchesTrigger` compares raw strings. It also silently broke the existing `me-number` webhook, which came back to life on deploy. See §2.15. | `webhook/manager.go` |
 | B10 ✅ | low | *(fixed in Phase 1, §2.11)* `PUBLIC_BASE_URL` defaults to `http://localhost:8080`, not set in `docker-compose.yaml`, so `download_url` is wrong from inside the MCP container. `webhook/manager.go:213` still hardcodes `http://localhost:8080/api/download`. | config, compose, webhook |
 
 ### 2.4 Next steps (in order)
@@ -326,6 +326,37 @@ in 475ms (rule 10 "Capture voice notes", worker 1)
 > [!IMPORTANT]
 > **B11 (new, med): a `sender` or `chat_jid` trigger typed as a phone number silently matches nothing.**
 > Every recent 1:1 audio message lives in a `@lid` chat with a LID sender (`62156783493249@lid`, sender `62156783493249`; own messages `14018823594220`) — no phone numbers anywhere, per §3.2 finding 6. `Manager.matchesTrigger` compares raw strings, while `ResolveChatJIDs` — which already expands phone ↔ LID for downloads — is not on that path. So a rule added as `972523996302` looks correct and captures nothing. This affects existing **webhook delivery** too, not just auto-download. Fix: expand `sender`/`chat_jid` trigger values through `whatsmeow_lid_map` when configs are loaded. Workaround until then: use a `media_type` trigger, or paste the `@lid` JID.
+
+### 2.15 Schema v3: visible captures and LID-aware triggers ✅ (2026-09-21, 11:53 UTC)
+
+Two gaps that only showed up once the feature was in a user's hands.
+
+**1. A capture left no trace anywhere a user looks.** `media.db` recorded it and the bridge
+logged it, but a download-only listener has no delivery rows, so the UI's per-listener log
+view — the obvious place to check — was empty. Deciding against an `auto_download_logs`
+table in §6 was right; leaving captures unlogged was not. Schema **v3** adds
+`event_type TEXT DEFAULT 'delivery'` to `webhook_logs`, and each capture writes a row there:
+same table, same endpoint, same Logs button, rendered as `CAPTURED` / `CAPTURE FAILED` with
+the saved path and the duration. Existing rows keep their meaning (10,384 of them read
+`delivery` after the migration).
+
+**2. B11 fixed.** `buildTriggerAliases` expands every **exact** `sender` / `chat_jid`
+trigger through `whatsmeow_lid_map` when configs load, so a rule typed as a phone number
+matches the `@lid` chat the contact actually writes from. `contains` and `regex` are left
+alone — widening a pattern would change what the user wrote. Group JIDs are unaffected. The
+expansion runs once per load, not per message (the §2.7/B6 mistake).
+
+The deploy proved the bug was live and not theoretical: the existing `me-number` webhook
+immediately reported
+`Trigger 15 (sender=972526996141) also matches [14018823594220@lid 14018823594220 …]`.
+It had been matching nothing since that chat moved to LID addressing.
+
+**Deploy note (cost an hour):** after `docker compose stop`, `docker compose up -d --build`
+**starts the existing stopped container** rather than replacing it, so the freshly built
+image is ignored and the old binary runs on. The log said `schema version 2` while the code
+on disk was at v3. §4.6 step 7 already warns about this — follow it: use
+`up -d --build --force-recreate`, and confirm the deploy by the schema version in the log,
+never by the build output.
 
 ---
 

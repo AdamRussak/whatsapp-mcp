@@ -248,10 +248,11 @@ func (store *MessageStore) DeleteWebhookTrigger(id int) error {
 func (store *MessageStore) StoreWebhookLog(log *types.WebhookLog) error {
 	_, err := store.db.Exec(
 		`INSERT INTO webhook_logs (webhook_config_id, message_id, chat_jid, trigger_type, trigger_value, 
-		 payload, response_status, response_body, attempt_count, delivered_at) 
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 payload, response_status, response_body, attempt_count, delivered_at, event_type) 
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.WebhookConfigID, log.MessageID, log.ChatJID, log.TriggerType, log.TriggerValue,
 		log.Payload, log.ResponseStatus, log.ResponseBody, log.AttemptCount, log.DeliveredAt,
+		eventTypeOrDefault(log.EventType),
 	)
 	return err
 }
@@ -259,7 +260,8 @@ func (store *MessageStore) StoreWebhookLog(log *types.WebhookLog) error {
 // GetWebhookLogs retrieves webhook logs with optional filtering
 func (store *MessageStore) GetWebhookLogs(webhookConfigID int, limit int) ([]*types.WebhookLog, error) {
 	query := `SELECT id, webhook_config_id, message_id, chat_jid, trigger_type, trigger_value, 
-		 payload, response_status, response_body, attempt_count, delivered_at, created_at 
+		 payload, response_status, response_body, attempt_count, delivered_at, created_at,
+		 COALESCE(event_type, 'delivery') 
 		 FROM webhook_logs`
 
 	var args []interface{}
@@ -285,7 +287,8 @@ func (store *MessageStore) GetWebhookLogs(webhookConfigID int, limit int) ([]*ty
 		log := &types.WebhookLog{}
 		err := rows.Scan(&log.ID, &log.WebhookConfigID, &log.MessageID, &log.ChatJID,
 			&log.TriggerType, &log.TriggerValue, &log.Payload, &log.ResponseStatus,
-			&log.ResponseBody, &log.AttemptCount, &log.DeliveredAt, &log.CreatedAt)
+			&log.ResponseBody, &log.AttemptCount, &log.DeliveredAt, &log.CreatedAt,
+			&log.EventType)
 		if err != nil {
 			return nil, err
 		}
@@ -293,4 +296,12 @@ func (store *MessageStore) GetWebhookLogs(webhookConfigID int, limit int) ([]*ty
 	}
 
 	return logs, nil
+}
+
+// eventTypeOrDefault keeps older callers, which never set EventType, writing delivery rows.
+func eventTypeOrDefault(eventType string) string {
+	if eventType == "" {
+		return "delivery"
+	}
+	return eventType
 }

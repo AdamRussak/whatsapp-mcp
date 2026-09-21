@@ -29,6 +29,15 @@ type Job struct {
 	ChatJID   string
 	RuleID    int
 	RuleName  string
+	// The trigger that matched, carried through so the outcome can be logged against it.
+	TriggerType  string
+	TriggerValue string
+}
+
+// Recorder persists the outcome of a capture so it can be seen after the fact. Without one,
+// a download-only listener leaves no trace anywhere a user looks.
+type Recorder interface {
+	RecordCapture(job Job, ok bool, detail string, duration time.Duration)
 }
 
 // Options configures the pool. Zero values fall back to the defaults below.
@@ -52,6 +61,7 @@ const (
 // Manager holds the queue and its workers.
 type Manager struct {
 	downloader Downloader
+	recorder   Recorder
 	logger     waLog.Logger
 	queue      chan Job
 	timeout    time.Duration
@@ -75,7 +85,7 @@ type Manager struct {
 }
 
 // NewManager creates a manager. It does not start any worker; call Start.
-func NewManager(downloader Downloader, logger waLog.Logger, opts Options) *Manager {
+func NewManager(downloader Downloader, recorder Recorder, logger waLog.Logger, opts Options) *Manager {
 	if opts.Workers <= 0 {
 		opts.Workers = defaultWorkers
 	}
@@ -92,6 +102,7 @@ func NewManager(downloader Downloader, logger waLog.Logger, opts Options) *Manag
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		downloader: downloader,
+		recorder:   recorder,
 		logger:     logger,
 		queue:      make(chan Job, opts.QueueSize),
 		timeout:    opts.Timeout,
@@ -217,6 +228,16 @@ func (m *Manager) run(workerID int, job Job) {
 
 	start := time.Now()
 	path, cached, err := m.downloader.DownloadVoice(ctx, job.MessageID, job.ChatJID)
+	elapsed := time.Since(start)
+
+	if m.recorder != nil {
+		detail := path
+		if err != nil {
+			detail = err.Error()
+		}
+		m.recorder.RecordCapture(job, err == nil, detail, elapsed)
+	}
+
 	switch {
 	case err != nil:
 		m.logger.Warnf("Auto-download failed for %s in %s (rule %d %q, worker %d, %s): %v",

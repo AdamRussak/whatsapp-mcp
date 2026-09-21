@@ -104,10 +104,10 @@ func TestEnqueueAutoDownloadsGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &recordingDownloader{}
-			wm := NewManager(nil, waLog.Noop, "")
+			wm := NewManager(nil, waLog.Noop, "", "")
 			wm.SetAutoDownloader(rec)
 
-			wm.enqueueAutoDownloads(testMessage(t, "c@s.whatsapp.net"), tc.media, tc.configs)
+			wm.enqueueAutoDownloads(testMessage(t, "c@s.whatsapp.net"), tc.media, "chat", tc.configs)
 
 			if got := len(rec.jobs) == 1; got != tc.want {
 				t.Fatalf("enqueued %d job(s), want enqueued=%v", len(rec.jobs), tc.want)
@@ -119,11 +119,11 @@ func TestEnqueueAutoDownloadsGate(t *testing.T) {
 // Two listeners wanting the same message produce one job, attributed to the first.
 func TestEnqueueAutoDownloadsQueuesOnceForSeveralListeners(t *testing.T) {
 	rec := &recordingDownloader{}
-	wm := NewManager(nil, waLog.Noop, "")
+	wm := NewManager(nil, waLog.Noop, "", "")
 	wm.SetAutoDownloader(rec)
 
 	configs := []*types.WebhookConfig{listener(3, true, boolPtr(true)), listener(4, true, boolPtr(true))}
-	wm.enqueueAutoDownloads(testMessage(t, "c@s.whatsapp.net"), voiceNote(), configs)
+	wm.enqueueAutoDownloads(testMessage(t, "c@s.whatsapp.net"), voiceNote(), "chat", configs)
 
 	if len(rec.jobs) != 1 {
 		t.Fatalf("enqueued %d jobs, want 1", len(rec.jobs))
@@ -136,13 +136,13 @@ func TestEnqueueAutoDownloadsQueuesOnceForSeveralListeners(t *testing.T) {
 
 // Without a pool attached, matching must simply do nothing.
 func TestEnqueueAutoDownloadsWithoutPool(t *testing.T) {
-	wm := NewManager(nil, waLog.Noop, "")
-	wm.enqueueAutoDownloads(testMessage(t, "c@s.whatsapp.net"), voiceNote(),
+	wm := NewManager(nil, waLog.Noop, "", "")
+	wm.enqueueAutoDownloads(testMessage(t, "c@s.whatsapp.net"), voiceNote(), "chat",
 		[]*types.WebhookConfig{listener(1, true, boolPtr(true))})
 }
 
 func TestValidateWebhookConfigURLRules(t *testing.T) {
-	wm := NewManager(nil, waLog.Noop, "")
+	wm := NewManager(nil, waLog.Noop, "", "")
 	trigger := []types.WebhookTrigger{{TriggerType: "sender", TriggerValue: "972500000000", MatchType: "exact", Enabled: true}}
 
 	tests := []struct {
@@ -184,7 +184,7 @@ func TestValidateWebhookConfigURLRules(t *testing.T) {
 
 // Testing a listener that posts nowhere has to fail loudly rather than pretend to deliver.
 func TestTestWebhookRejectsDownloadOnlyListener(t *testing.T) {
-	wm := NewManager(nil, waLog.Noop, "")
+	wm := NewManager(nil, waLog.Noop, "", "")
 	err := wm.TestWebhook(&types.WebhookConfig{Name: "capture", AutoDownload: true})
 	if err == nil {
 		t.Fatal("TestWebhook accepted a listener with no URL")

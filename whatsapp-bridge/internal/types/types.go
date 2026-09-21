@@ -158,6 +158,9 @@ type WebhookLog struct {
 	AttemptCount    int        `json:"attempt_count"`
 	DeliveredAt     *time.Time `json:"delivered_at"`
 	CreatedAt       time.Time  `json:"created_at"`
+	// EventType is "delivery" for a webhook POST, "auto_download" for a capture. Both are
+	// actions of the same listener, so they share one log.
+	EventType string `json:"event_type"`
 }
 
 // SendMessageRequest represents the request body for the send message API

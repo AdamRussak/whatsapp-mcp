@@ -313,6 +313,20 @@ const oldWebhookSchema = `
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
+	CREATE TABLE webhook_logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		webhook_config_id INTEGER REFERENCES webhook_configs(id),
+		message_id TEXT,
+		chat_jid TEXT,
+		trigger_type TEXT,
+		trigger_value TEXT,
+		payload TEXT,
+		response_status INTEGER,
+		response_body TEXT,
+		attempt_count INTEGER DEFAULT 1,
+		delivered_at TIMESTAMP,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
 `
 
 // TestMigrationV2AddsAutoDownloadColumns checks the schema-v2 half of §4.6 step 6: an
@@ -363,8 +377,8 @@ func TestMigrationV2AddsAutoDownloadColumns(t *testing.T) {
 	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("schema version = %d, want 3", version)
 	}
 	db.Close()
 }
@@ -386,5 +400,41 @@ func TestFreshDatabaseHasAutoDownloadColumns(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("fresh webhook_configs has %d of the 2 auto-download columns", count)
+	}
+}
+
+// TestMigrationV3AddsEventTypeToLogs checks that existing delivery logs keep their meaning:
+// the column defaults to 'delivery', so nothing already recorded is reclassified.
+func TestMigrationV3AddsEventTypeToLogs(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite3", filepath.Join(dir, "messages.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(oldSchema + oldWebhookSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO webhook_logs (webhook_config_id, message_id, chat_jid, response_status)
+		VALUES (?, ?, ?, ?)`, 1, "OLDLOG", "c@s.whatsapp.net", 200); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+
+	var messageID, eventType string
+	var status int
+	if err := db.QueryRow(`SELECT message_id, response_status, event_type FROM webhook_logs WHERE id = 1`).
+		Scan(&messageID, &status, &eventType); err != nil {
+		t.Fatal(err)
+	}
+	if messageID != "OLDLOG" || status != 200 {
+		t.Fatalf("the migration rewrote an existing log row: %q %d", messageID, status)
+	}
+	if eventType != "delivery" {
+		t.Fatalf("event_type = %q, want delivery so old rows keep their meaning", eventType)
 	}
 }

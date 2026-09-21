@@ -128,7 +128,8 @@ func createTables(db *sql.DB) error {
 			response_body TEXT,
 			attempt_count INTEGER DEFAULT 1,
 			delivered_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			event_type TEXT DEFAULT 'delivery'
 		);
 
 		CREATE TABLE IF NOT EXISTS poll_options (
