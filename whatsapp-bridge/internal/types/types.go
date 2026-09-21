@@ -53,6 +53,9 @@ type WebhookConfig struct {
 	// AutoDownloadVoiceOnly restricts that to voice notes (is_ptt). It is a pointer so an
 	// absent JSON field means "true" — the column default — rather than "download all audio".
 	AutoDownloadVoiceOnly *bool `json:"auto_download_voice_only"`
+	// RetentionDays is how long this listener's captures are kept before retention removes
+	// the files. 0 — the default, and what an absent JSON field means — keeps them forever.
+	RetentionDays int `json:"retention_days"`
 }
 
 // VoiceOnly reports whether auto-download is restricted to voice notes, defaulting to true

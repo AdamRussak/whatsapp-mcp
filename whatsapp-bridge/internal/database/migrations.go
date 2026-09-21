@@ -60,6 +60,17 @@ var migrations = []migration{
 			})
 		},
 	},
+	{
+		version: 4,
+		name:    "per-listener retention",
+		apply: func(tx *sql.Tx) error {
+			// Days a listener's captures are kept before retention removes the files. The
+			// default, 0, means keep forever: no existing listener starts deleting anything.
+			return addColumns(tx, "webhook_configs", []column{
+				{"retention_days", "INTEGER DEFAULT 0"},
+			})
+		},
+	},
 }
 
 type column struct {

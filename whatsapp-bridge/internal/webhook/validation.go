@@ -36,6 +36,11 @@ func (wm *Manager) ValidateWebhookConfig(config *types.WebhookConfig) error {
 		}
 	}
 
+	// Ten years is a generous ceiling; the point is to catch a typo, not to limit anyone.
+	if config.RetentionDays < 0 || config.RetentionDays > 3650 {
+		return fmt.Errorf("retention_days must be between 0 (keep forever) and 3650")
+	}
+
 	// Validate triggers
 	for _, trigger := range config.Triggers {
 		if trigger.TriggerType == "" {

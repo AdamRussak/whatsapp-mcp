@@ -201,6 +201,17 @@ header p {
     color: var(--secondary-color);
 }
 
+/* A number with its unit beside it */
+.inline-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.inline-field input {
+    width: 110px;
+}
+
 /* Explanatory line under a form field */
 .field-hint {
     display: block;

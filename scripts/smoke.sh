@@ -7,7 +7,7 @@
 #
 # Usage:
 #   scripts/smoke.sh                       # expects the schema version the repo is at
-#   EXPECT_SCHEMA=3 scripts/smoke.sh
+#   EXPECT_SCHEMA=4 scripts/smoke.sh
 #   BRIDGE=http://host:8080 UI=http://host:8089 scripts/smoke.sh
 #
 # Exits non-zero on the first failed check. Needs only curl and python3.
@@ -17,7 +17,7 @@ set -uo pipefail
 BRIDGE="${BRIDGE:-http://localhost:8080}"
 UI="${UI:-http://localhost:8089}"
 # Bump this when a migration ships; it is the deploy's proof of life.
-EXPECT_SCHEMA="${EXPECT_SCHEMA:-3}"
+EXPECT_SCHEMA="${EXPECT_SCHEMA:-4}"
 
 pass=0
 fail=0
@@ -65,6 +65,9 @@ if [ "$STATUS" = "200" ]; then
   connected="$(printf '%s' "$health" | json "str(d['whatsapp_connected']).lower()")"
   [ "$connected" = "true" ] && ok "connected to WhatsApp" || bad "not connected to WhatsApp"
 
+  retention="$(printf '%s' "$health" | json "'off' if not d['retention'].get('enabled') else ('dry run' if d['retention'].get('dry_run') else 'removing files')")"
+  ok "retention: $retention"
+
   pool="$(printf '%s' "$health" | json "str(d['auto_download'].get('enabled')).lower()")"
   if [ "$pool" = "true" ]; then
     depth="$(printf '%s' "$health" | json "d['auto_download']['queue_depth']")"
@@ -90,7 +93,7 @@ else
   bad "/api/webhooks returned $STATUS"
 fi
 
-for path in "/api/chats?limit=1" "/api/downloads?limit=1" "/api/webhook-logs"; do
+for path in "/api/chats?limit=1" "/api/downloads?limit=1" "/api/webhook-logs" "/api/retention/preview"; do
   get "$BRIDGE$path"
   [ "$STATUS" = "200" ] && ok "$path answers" || bad "$path returned $STATUS"
 done
@@ -104,7 +107,7 @@ if [ "$STATUS" = "200" ]; then
   # Substring matching in the shell, not `printf | grep -q`: grep exits on its first match,
   # printf takes SIGPIPE, and with `pipefail` the pipeline reports failure — so an early
   # match looks like a miss. That bug made this script report a stale UI that was fine.
-  for marker in autoDownload autoDownloadVoiceOnly voiceOnlyGroup downloadsView; do
+  for marker in autoDownload autoDownloadVoiceOnly voiceOnlyGroup downloadsView retentionGroup; do
     if [[ "$index" == *"$marker"* ]]; then
       ok "index.html has $marker"
     else
@@ -119,7 +122,7 @@ if [ "$STATUS" = "200" ]; then
     ok "index.html requests $script_src"
     get "$UI/$script_src"; script="$BODY"
     if [ "$STATUS" = "200" ]; then
-      for fn in syncAutoDownloadFields attachChatPicker renderChatOptions createDownloadRow; do
+      for fn in syncAutoDownloadFields attachChatPicker renderChatOptions createDownloadRow loadRetentionMode; do
         if [[ "$script" == *"$fn"* ]]; then
           ok "$script_src defines $fn"
         else

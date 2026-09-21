@@ -19,13 +19,18 @@ const (
 	DownloadStatusNotOnPhone         = "expired_not_on_phone" // CDN copy expired and the phone no longer has the file
 	DownloadStatusRekeyedOnPhone     = "rekeyed_on_phone"     // phone re-uploaded with a media key we don't have
 	DownloadStatusIncompleteMetadata = "incomplete_metadata"  // messages.db lacks key, hashes or URL
+	// DownloadStatusPruned: the file was downloaded, then removed by a listener's retention
+	// policy. local_path and downloaded_at are kept, so the history stays honest.
+	DownloadStatusPruned = "pruned"
 )
 
-// IsPermanentDownloadFailure reports whether a status can't change by retrying,
-// so batch re-runs skip it unless retry_failed is set.
+// IsPermanentDownloadFailure reports whether a status is settled, so batch re-runs skip it
+// unless retry_failed is set. That includes pruned: a file removed on purpose must not be
+// quietly fetched again by the next batch run.
 func IsPermanentDownloadFailure(status string) bool {
 	switch status {
-	case DownloadStatusNotOnPhone, DownloadStatusRekeyedOnPhone, DownloadStatusIncompleteMetadata:
+	case DownloadStatusNotOnPhone, DownloadStatusRekeyedOnPhone, DownloadStatusIncompleteMetadata,
+		DownloadStatusPruned:
 		return true
 	}
 	return false
@@ -377,4 +382,21 @@ func (s *MediaStore) ListDownloadRecords(chatJIDs []string, status string) ([]Me
 		records = append(records, rec)
 	}
 	return records, rows.Err()
+}
+
+// MarkPruned records that retention removed a downloaded file. It only moves a record from
+// ok to pruned: a record that changed underneath the sweep (re-downloaded, or already
+// pruned) is left alone, and false is returned.
+func (s *MediaStore) MarkPruned(messageID, chatJID, reason string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE media_downloads SET status = ?, error = ?
+		WHERE message_id = ? AND chat_jid = ? AND status = ?`,
+		DownloadStatusPruned, reason, messageID, chatJID, DownloadStatusOK)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }

@@ -71,6 +71,7 @@
                     <select id="downloadsStatus">
                         <option value="ok">Downloaded</option>
                         <option value="failed">Failed</option>
+                        <option value="pruned">Removed by retention</option>
                         <option value="all">All</option>
                     </select>
                 </div>
@@ -168,6 +169,17 @@
                     </label>
                     <small class="field-hint">
                         Off also captures forwarded music and attached audio files.
+                    </small>
+                </div>
+
+                <div class="form-group" id="retentionGroup" style="display: none;">
+                    <label for="retentionDays">Keep captured files for</label>
+                    <div class="inline-field">
+                        <input type="number" id="retentionDays" name="retention_days" min="0" max="3650" step="1" placeholder="forever">
+                        <span>days</span>
+                    </div>
+                    <small class="field-hint" id="retentionHint">
+                        Blank keeps them forever. A file another listener still wants is kept, and files you download by hand are never removed.
                     </small>
                 </div>
 
@@ -333,7 +345,7 @@
         <button id="toastClose" class="toast-close">&times;</button>
     </div>
 
-    <script src="script.js?v=8"></script>
+    <script src="script.js?v=9"></script>
 </body>
 
 </html>

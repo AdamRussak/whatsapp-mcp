@@ -41,6 +41,21 @@ class WebhookManager {
         }
         
         this.loadWebhooks();
+        this.loadRetentionMode();
+    }
+
+    // loadRetentionMode learns whether retention actually removes files, so the form can say
+    // so. Best effort: without it the hint just stays generic.
+    async loadRetentionMode() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/health`);
+            if (!response.ok) return;
+            const data = await response.json();
+            this.retention = data.retention || { enabled: false };
+            this.syncAutoDownloadFields();
+        } catch (error) {
+            this.retention = null;
+        }
     }
 
     setupEventListeners() {
@@ -179,9 +194,10 @@ class WebhookManager {
         const autoDownloadBadge = clone.querySelector('.webhook-autodownload');
         if (webhook.auto_download) {
             autoDownloadBadge.style.display = '';
-            autoDownloadBadge.title = webhook.auto_download_voice_only === false
+            autoDownloadBadge.title = (webhook.auto_download_voice_only === false
                 ? 'Downloads all audio from matching messages'
-                : 'Downloads voice notes from matching messages';
+                : 'Downloads voice notes from matching messages')
+                + (webhook.retention_days > 0 ? `, kept ${webhook.retention_days} days` : ', kept forever');
         }
         clone.querySelector('.webhook-created').textContent = this.formatDate(webhook.created_at);
         
@@ -260,6 +276,7 @@ class WebhookManager {
         document.getElementById('webhookEnabled').checked = true;
         document.getElementById('autoDownload').checked = false;
         document.getElementById('autoDownloadVoiceOnly').checked = true;
+        document.getElementById('retentionDays').value = '';
         this.syncAutoDownloadFields();
         
         // Reset triggers to one default row
@@ -294,6 +311,17 @@ class WebhookManager {
         document.getElementById('voiceOnlyGroup').style.display = on ? '' : 'none';
         document.getElementById('webhookURLLabel').textContent = on ? 'Webhook URL' : 'Webhook URL *';
         document.getElementById('webhookURLHint').style.display = on ? '' : 'none';
+        document.getElementById('retentionGroup').style.display = on ? '' : 'none';
+
+        const hint = document.getElementById('retentionHint');
+        const base = 'Blank keeps them forever. A file another listener still wants is kept, and files you download by hand are never removed.';
+        if (this.retention && this.retention.enabled === false) {
+            hint.textContent = 'Retention is switched off on the bridge (RETENTION=off): nothing is removed.';
+        } else if (this.retention && this.retention.dry_run) {
+            hint.textContent = `${base} Dry run is on: the bridge only reports what it would remove.`;
+        } else {
+            hint.textContent = base;
+        }
     }
 
     populateForm(webhook) {
@@ -303,6 +331,7 @@ class WebhookManager {
         document.getElementById('webhookEnabled').checked = webhook.enabled;
         document.getElementById('autoDownload').checked = !!webhook.auto_download;
         document.getElementById('autoDownloadVoiceOnly').checked = webhook.auto_download_voice_only !== false;
+        document.getElementById('retentionDays').value = webhook.retention_days > 0 ? String(webhook.retention_days) : '';
         this.syncAutoDownloadFields();
         
         // Populate triggers
@@ -612,6 +641,7 @@ class WebhookManager {
             expired_not_on_phone: 'Expired',
             rekeyed_on_phone: 'Unrecoverable',
             incomplete_metadata: 'No key stored',
+            pruned: 'Removed by retention',
         };
         return labels[status] || status;
     }
@@ -640,6 +670,8 @@ class WebhookManager {
             enabled: document.getElementById('webhookEnabled').checked,
             auto_download: document.getElementById('autoDownload').checked,
             auto_download_voice_only: document.getElementById('autoDownloadVoiceOnly').checked,
+            // Blank means keep forever, sent as 0.
+            retention_days: parseInt(document.getElementById('retentionDays').value, 10) || 0,
             triggers: this.collectTriggers()
         };
         
@@ -927,9 +959,12 @@ class WebhookManager {
         // An auto-download capture is an action of the same listener, not an HTTP delivery:
         // it has no status code, and delivered_at carries whether the file landed.
         const isCapture = log.event_type === 'auto_download';
+        const isRemoval = log.event_type === 'retention';
 
         let status = 'pending';
-        if (isCapture) {
+        if (isRemoval) {
+            status = 'success';
+        } else if (isCapture) {
             status = log.delivered_at ? 'success' : 'error';
         } else if (log.response_status) {
             status = log.response_status >= 200 && log.response_status < 300 ? 'success' : 'error';
@@ -943,7 +978,9 @@ class WebhookManager {
         
         // Fill in the data
         const statusBadge = clone.querySelector('.status-badge');
-        if (isCapture) {
+        if (isRemoval) {
+            statusBadge.textContent = 'REMOVED';
+        } else if (isCapture) {
             statusBadge.textContent = status === 'success' ? 'CAPTURED' : 'CAPTURE FAILED';
         } else {
             statusBadge.textContent = status.toUpperCase();
@@ -976,7 +1013,15 @@ class WebhookManager {
         
         // Response information
         let responseText = 'N/A';
-        if (isCapture) {
+        if (isRemoval) {
+            let days = null;
+            try {
+                days = JSON.parse(log.payload || '{}').retention_days;
+            } catch (e) {
+                days = null;
+            }
+            responseText = `${log.response_body || 'file'} removed${days ? ` after ${days} days` : ''}`;
+        } else if (isCapture) {
             responseText = log.response_body || 'N/A';
             let durationMs = null;
             try {

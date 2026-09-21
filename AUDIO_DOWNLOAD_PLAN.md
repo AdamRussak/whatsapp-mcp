@@ -16,7 +16,7 @@ Legend: ✅ done · 🟡 partly done / done with open issues · ❌ not started 
 | G3 | Download past voice messages from one chat or group | Milestone 1 (batch job) → Phase 5 (by sender, history request) | ✅ batch job run over the target contact's full history (4,062 items, §2.9); only the last ~11–19 days are recoverable (B1) |
 | G2 | Auto-download voice messages from chosen users / groups, using the webhook trigger rules | Phase 4 | ✅ live since 2026-09-21 (auto-download is an action on a webhook entry, §2.14) |
 
-Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ → backlog sweep ✅ → Phase 4 ✅ (brought forward, §2.12) → Phase 7 ← next → Phases 2/3 → Phase 5 → Phase 6.**
+Order: **Milestone 1 ✅ → Phase 0 ✅ → Phase 1 ✅ → backlog sweep ✅ → Phase 4 ✅ (brought forward, §2.12) → Phase 7 ✅ → Phases 2/3 ← next → Phase 5 → Phase 6.**
 
 All three goals are met for media inside the CDN window. What remains is ergonomics (Phases 2/3: MCP tools, MP3 conversion, a Gradio tab), the low-payoff history request (Phase 5), transcription (Phase 6), and the operational gaps in §2.16.
 
@@ -371,7 +371,7 @@ All three goals in §1 are met for media inside the CDN window. What is left, wo
 |---|---|---|
 | O1 | **Re-pairing after S1 is still undecided** (§2.4 step 1) | The session DB was served on an open port for an unknown window. No access log exists, so there is no way to tell whether it was fetched. Your call. |
 | O2 | **Port 8080 is still public and unauthenticated** ⚠️ **worsens with Phase 7** | `/api/download`, `/api/media/` and `/api/webhooks` all answer anyone who can reach the host. S1 is fixed, but the surface is unchanged. Phase 7 adds `/api/chats` (the whole address book) and `/api/downloads` (the media index) with auth declined on 2026-09-21, so the exposure grows. Bind to localhost or the Docker network, or add token auth. |
-| O3 | **No retention policy for captured media** | Negligible at voice-note volume (281 files, ~30 MB). Becomes load-bearing the moment capture widens to images or video. Planned as §6 Phase 7.5 (per listener, schema v4). |
+| O3 ✅ | **Retention exists, and is in dry run** | Per-listener retention shipped (§6 Phase 7.5, §2.18) with `RETENTION_DRY_RUN=true`. Set a listener's "Keep for", check `GET /api/retention/preview`, then set `RETENTION_DRY_RUN=false` and redeploy. Captures before schema v3 and the whole 268-file backlog have no capture log, so retention never removes them, whatever is configured. |
 | O4 | **`me-number` webhook is live again** | It matched nothing for months (B11) and now fires on your own messages. If n8n acts on it, check that before it surprises you. |
 
 **Known bugs**
@@ -442,6 +442,43 @@ names `PutContactName`'s parameters `(fullName, firstName)`; its SQL implementat
 `(firstName, fullName)`. Go binds by position, so following the interface's labels stores
 the two swapped. The first run of the new test did exactly that. Live data is unaffected —
 whatsmeow calls its own implementation correctly.
+
+### 2.18 Phase 7.5 — retention deployed, in dry run ✅ (2026-09-21, 13:48 UTC)
+
+**Deploy.** Full §4.6 checklist: image tagged `whatsapp-bridge:pre-retention`, stop with no
+journal left, backups of all three databases (`integrity_check` ok on each), baseline,
+rehearsal of migration v4 on a fresh copy (only `schema_version` moved; all 7 listener rows
+byte-identical; every listener `retention_days = 0`), `up -d --build --force-recreate`,
+`smoke.sh` 24/24. Live: only `schema_version` 3→4 changed, listeners byte-identical,
+`quick_check` ok, `media.db` unchanged, 281 audio files present. The bridge logs
+`Retention started: every 1h0m0s, at most 500 per sweep, DRY RUN, nothing is removed`, and
+the preview reports **0 due** — every listener still keeps forever.
+
+**A real deletion was rehearsed on a full copy** of the store — all three databases and all
+317 media files, fingerprinted first — with listener 10 set to keep 1 day and the clock set
+to 2026-10-01, using `cmd/retention`:
+- without the `REHEARSAL` marker, `-apply` refused;
+- with it, **exactly one file** was removed: the sha256 diff of all 317 files shows one line
+  gone and every other file byte-identical, including the whole backlog and every
+  `index.json`; the session database's hash was unchanged; the record reads `pruned` with its
+  reason; one `retention` row was logged; a second pass removed nothing;
+- the worst misconfiguration — **every** listener set to 1 day, clock a year ahead — left
+  **0 files due**: the other 269 files were never captured by a listener.
+
+The copy, which held a duplicate of the session database, was deleted afterwards.
+
+**Two findings from real data:**
+- **Pre-v3 captures are permanent.** Listener 10 captured two voice notes on deploy day
+  but has one capture log: the 11:38 capture predates schema v3's capture logging. With no
+  attribution, retention never removes it. The same is true of the 268-file backlog, which
+  was fetched by batch rather than captured. This is the fail-closed rule working as
+  designed, and worth knowing before expecting "keep 30 days" to shrink old files.
+- **Deleting a listener makes its files permanent too**, since its logs go with it
+  (`DeleteWebhookConfig`). The safe direction, and documented rather than changed.
+
+**Still to do — your call:** retention runs in **dry run**. When you want it to remove files:
+set "Keep captured files for" on a listener, check `GET /api/retention/preview`, then set
+`RETENTION_DRY_RUN=false` in `docker-compose.yaml` and redeploy with `--force-recreate`.
 
 ---
 
@@ -557,6 +594,7 @@ Mounts differ: bridge sees `/app/whatsapp-bridge/store`, MCP sees `/app/store`. 
 
 ### 4.7 Code-review blockers
 - Any non-`SELECT` against `messages`/`chats` in download code, or any `CREATE`/`ALTER` in `messages.db`/`whatsapp.db` (Milestone 1).
+- Any file deletion that does not go through `mediapath.Resolve` **and** a regular-file (non-symlink) check, or that can name a path outside `store/media/` (Phase 7.5).
 - `SELECT *`; a test opening the real `store/*.db`; downloads inside the event handler; a file path built from unsanitised `chat_jid`/`message_id`; a served path outside `store/media/`.
 
 ---
@@ -840,7 +878,7 @@ type Downloader interface {
 
 `transcribe_voice_message(message_id, chat_jid, language)` MCP tool with `faster-whisper` or an API backend; cache in a `transcripts` table; add `transcript` to `list_messages`; optional `transcribe: true` on auto-download rules.
 
-### Phase 7 — Listener ergonomics, retention and a downloads view 🟡 (7.1–7.4 ✅, 7.5 ❌)
+### Phase 7 — Listener ergonomics, retention and a downloads view ✅ (2026-09-21, §2.18)
 
 Four items from §2.16, in the order they should land. The sequence is deliberate: the chat
 picker unblocks two UIs, the health endpoint and smoke check make every later deploy
@@ -1002,7 +1040,7 @@ backups, the WhatsApp session included** — to the Docker daemon: build context
 an image; a stray `whatsapp-bridge/store/whatsapp.db` from local testing holds no paired
 device and is discarded with the bridge's builder stage.
 
-#### 7.5 Per-listener retention (schema v4) — destructive, lands last
+#### 7.5 Per-listener retention (schema v4) ✅ — destructive, landed last
 
 - **Schema v4**: `webhook_configs.retention_days INTEGER` (NULL or 0 = keep forever), plus
   the same column in `createTables`. Additive with a constant default, per §4.2.
@@ -1034,6 +1072,35 @@ device and is discarded with the bridge's builder stage.
   kept; a manual download is never touched; a path outside the media root is refused; dry-run
   deletes nothing; the row becomes `pruned`; a `pruned` record is not re-downloaded without
   an explicit override; the per-sweep cap holds.
+
+**Shipped as planned, plus:**
+- **The path gate is shared, not copied.** `resolveMediaPath` moved verbatim (diff-checked)
+  into `internal/mediapath`, which both `/api/media/` and the sweeper import. Deleting is
+  **stricter** than serving: the file must also be a regular file, not a symlink, because
+  removing through a link can delete the file it points at.
+- **Every capture must have expired**, under an **enabled** listener with a **finite**
+  retention. One capture by a listener that keeps forever, is disabled, or has not expired
+  keeps the file; so does a re-capture, which resets the clock. An orphaned capture fails
+  closed (tested on the decision itself — the foreign key on `webhook_logs` makes it
+  impossible in the database today).
+- **Remove, then record.** A failure between the two leaves an `ok` record with no file,
+  which the Downloads view shows as missing, never a `pruned` record over a surviving file.
+- **`GET /api/retention/preview`** lists exactly what the next sweep would remove, without
+  removing anything. `/api/health` reports retention's mode and last sweep.
+- **`RETENTION_DRY_RUN` fails safe:** only an explicit false turns deletion on; a typo such
+  as `ture` means dry run. Pinned by `TestRetentionDryRunFailsSafe`.
+- **`cmd/retention`** rehearses a sweep against a store copy at a simulated date. `-apply`
+  refuses to run without a `REHEARSAL` marker file in `STORE_DIR`, so it cannot be pointed
+  at the live store by accident.
+- **UI**: "Keep captured files for N days" beside the auto-download options (blank =
+  forever, sent as 0), a hint that says when retention is a dry run or switched off,
+  `REMOVED` rows in the Logs view, and "Removed by retention" in the Downloads filter.
+
+**Tests:** 13 sweeper tests (every unsafe path, including a symlink disguised as audio that
+points at the session database and a symlink to another voice note), guard and fail-safe
+tests, 8 new UI tests — **108 Go tests, 29 UI tests**. **Mutation-checked, 4/4 caught:**
+deleting through symlinks, ignoring a disabled listener, letting one expired capture
+suffice, and a dry run that deletes.
 
 #### Deploy
 

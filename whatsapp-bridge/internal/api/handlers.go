@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"whatsapp-bridge/internal/database"
+	"whatsapp-bridge/internal/mediapath"
+	"whatsapp-bridge/internal/retention"
 	"whatsapp-bridge/internal/types"
 	"whatsapp-bridge/internal/whatsapp"
 )
@@ -320,6 +323,8 @@ func (s *Server) handleDownloadMedia(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		MessageID string `json:"message_id"`
 		ChatJID   string `json:"chat_jid"`
+		// Force re-downloads a file that retention removed.
+		Force bool `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MessageID == "" || req.ChatJID == "" {
 		SendJSONError(w, "message_id and chat_jid are required", http.StatusBadRequest)
@@ -329,9 +334,14 @@ func (s *Server) handleDownloadMedia(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.client.MediaRetryTimeout()+60*time.Second)
 	defer cancel()
 
-	res, err := s.client.DownloadMedia(ctx, s.mediaStore, s.messageStore, req.MessageID, req.ChatJID, s.storeDir)
+	res, err := s.client.DownloadMediaWithOptions(ctx, s.mediaStore, s.messageStore, req.MessageID, req.ChatJID, s.storeDir,
+		whatsapp.DownloadOptions{Force: req.Force})
 	if err != nil {
-		SendJSONError(w, err.Error(), http.StatusBadGateway)
+		status := http.StatusBadGateway
+		if errors.Is(err, whatsapp.ErrPrunedByRetention) {
+			status = http.StatusGone
+		}
+		SendJSONError(w, err.Error(), status)
 		return
 	}
 
@@ -522,6 +532,8 @@ func (s *Server) runBatchDownload(
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		_, err = s.client.DownloadMediaWithOptions(ctx, s.mediaStore, s.messageStore, msg.ID, msg.ChatJID, s.storeDir, whatsapp.DownloadOptions{
 			SkipMediaRetry: skipMediaRetry,
+			// retry_failed is the batch's explicit "fetch it again", pruned files included.
+			Force: retryFailed,
 		})
 		cancel()
 
@@ -638,46 +650,6 @@ func (s *Server) handleBatchJobByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// servableMediaTypes maps the only file extensions /api/media/ may serve to their content types
-var servableMediaTypes = map[string]string{
-	".ogg": "audio/ogg; codecs=opus",
-	".mp3": "audio/mpeg",
-}
-
-// resolveMediaPath maps a request subpath to a file inside mediaRoot. It rejects traversal,
-// absolute paths, symlinks leaving mediaRoot, and any extension other than .ogg/.mp3, so the
-// databases and other files in the store directory can never be served.
-func resolveMediaPath(mediaRoot, subpath string) (string, string, bool) {
-	if subpath == "" || strings.Contains(subpath, "\\") {
-		return "", "", false
-	}
-	cleanPath := filepath.Clean(subpath)
-	if filepath.IsAbs(cleanPath) || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") {
-		return "", "", false
-	}
-	contentType, ok := servableMediaTypes[strings.ToLower(filepath.Ext(cleanPath))]
-	if !ok {
-		return "", "", false
-	}
-
-	rootAbs, err := filepath.EvalSymlinks(mediaRoot)
-	if err != nil {
-		return "", "", false
-	}
-	targetAbs, err := filepath.EvalSymlinks(filepath.Join(mediaRoot, cleanPath))
-	if err != nil {
-		return "", "", false
-	}
-	rel, err := filepath.Rel(rootAbs, targetAbs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", "", false
-	}
-	if fi, err := os.Stat(targetAbs); err != nil || !fi.Mode().IsRegular() {
-		return "", "", false
-	}
-	return targetAbs, contentType, true
-}
-
 // handleServeMedia streams downloaded audio files from <store>/media (GET /api/media/{path...})
 func (s *Server) handleServeMedia(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -686,7 +658,7 @@ func (s *Server) handleServeMedia(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subpath := strings.TrimPrefix(r.URL.Path, "/api/media/")
-	targetPath, contentType, ok := resolveMediaPath(filepath.Join(s.storeDir, "media"), subpath)
+	targetPath, contentType, ok := mediapath.Resolve(filepath.Join(s.storeDir, "media"), subpath)
 	if !ok {
 		SendJSONError(w, "media file not found", http.StatusNotFound)
 		return
@@ -865,6 +837,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	retentionStatus := map[string]interface{}{"enabled": false}
+	if s.retention != nil {
+		retentionStatus = map[string]interface{}{
+			"enabled":          true,
+			"dry_run":          s.retention.DryRun(),
+			"interval_minutes": int(s.retention.Interval().Minutes()),
+			"last_sweep":       s.retention.LastResult(),
+		}
+	}
+
 	connected := false
 	if s.client != nil {
 		connected = s.client.IsConnected()
@@ -876,6 +858,44 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"schema_version":     schemaVersion,
 		"whatsapp_connected": connected,
 		"auto_download":      autoDownload,
+		"retention":          retentionStatus,
+	})
+}
+
+// maxPreviewItems bounds the preview's item list; the count is always exact.
+const maxPreviewItems = 100
+
+// handleRetentionPreview lists what the next retention sweep would remove, without removing
+// anything (GET /api/retention/preview). It is the way to check a listener's retention
+// before trusting it, and to review what a dry run would do.
+func (s *Server) handleRetentionPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.retention == nil {
+		SendJSON(w, map[string]interface{}{"success": true, "enabled": false, "due": 0, "data": []retention.Candidate{}})
+		return
+	}
+
+	due, err := s.retention.Plan()
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to plan retention: %v", err), http.StatusInternalServerError)
+		return
+	}
+	items := due
+	if len(items) > maxPreviewItems {
+		items = items[:maxPreviewItems]
+	}
+	if items == nil {
+		items = []retention.Candidate{}
+	}
+	SendJSON(w, map[string]interface{}{
+		"success": true,
+		"enabled": true,
+		"dry_run": s.retention.DryRun(),
+		"due":     len(due),
+		"data":    items,
 	})
 }
 
@@ -892,6 +912,7 @@ var downloadStatuses = map[string]bool{
 	database.DownloadStatusNotOnPhone:         true,
 	database.DownloadStatusRekeyedOnPhone:     true,
 	database.DownloadStatusIncompleteMetadata: true,
+	database.DownloadStatusPruned:             true,
 }
 
 // downloadItem is one row of GET /api/downloads.

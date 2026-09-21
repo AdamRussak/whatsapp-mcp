@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -168,5 +169,56 @@ func TestMediaRetryTimeoutDefault(t *testing.T) {
 	c.SetMediaRetryTimeout(45 * time.Second)
 	if got := c.MediaRetryTimeout(); got != 45*time.Second {
 		t.Errorf("after set = %v, want 45s", got)
+	}
+}
+
+// A file retention removed stays removed. Without this, the disk and cache checks find
+// nothing and the next batch run — or any single download — quietly fetches it back.
+func TestDownloadMediaRefusesPrunedUnlessForced(t *testing.T) {
+	// No media key, so a download that gets past the guard fails at the metadata check,
+	// before any network access. That makes "refused" and "let through" distinguishable.
+	dir, c, ms, media, _ := newDownloadFixture(t, nil)
+
+	if err := media.RecordDownload(&database.MediaDownloadRecord{
+		MessageID: "AUD1", ChatJID: testChat, Status: database.DownloadStatusOK,
+		LocalPath: "media/x/AUD1.ogg",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pruned, err := media.MarkPruned("AUD1", testChat, "kept 30 days"); err != nil || !pruned {
+		t.Fatalf("MarkPruned = %v, %v", pruned, err)
+	}
+
+	_, err := c.DownloadMediaWithOptions(context.Background(), media, ms, "AUD1", testChat, dir, DownloadOptions{})
+	if !errors.Is(err, ErrPrunedByRetention) {
+		t.Fatalf("unforced download of a pruned file: err = %v, want ErrPrunedByRetention", err)
+	}
+	if rec, _ := media.GetDownload("AUD1", testChat); rec.Status != database.DownloadStatusPruned {
+		t.Fatalf("a refused download changed the record to %q", rec.Status)
+	}
+
+	_, err = c.DownloadMediaWithOptions(context.Background(), media, ms, "AUD1", testChat, dir, DownloadOptions{Force: true})
+	if errors.Is(err, ErrPrunedByRetention) {
+		t.Fatal("Force did not get past the retention guard")
+	}
+
+	if !database.IsPermanentDownloadFailure(database.DownloadStatusPruned) {
+		t.Error("batch re-runs must skip pruned files unless retry_failed is set")
+	}
+}
+
+// MarkPruned only moves ok to pruned: a record that changed under the sweep is left alone.
+func TestMarkPrunedOnlyTouchesOK(t *testing.T) {
+	_, _, _, media, _ := newDownloadFixture(t, nil)
+	if err := media.RecordDownload(&database.MediaDownloadRecord{
+		MessageID: "AUD1", ChatJID: testChat, Status: database.DownloadStatusFailed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pruned, err := media.MarkPruned("AUD1", testChat, "x"); err != nil || pruned {
+		t.Fatalf("MarkPruned on a failed record = %v, %v; want false", pruned, err)
+	}
+	if pruned, _ := media.MarkPruned("NOPE", testChat, "x"); pruned {
+		t.Fatal("MarkPruned on a missing record returned true")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"whatsapp-bridge/internal/database"
+	"whatsapp-bridge/internal/retention"
 	"whatsapp-bridge/internal/webhook"
 	"whatsapp-bridge/internal/whatsapp"
 )
@@ -27,6 +28,12 @@ type Server struct {
 	paceMs         int
 	publicBaseURL  string
 	autoDownload   AutoDownloadStatus
+	retention      *retention.Sweeper
+}
+
+// SetRetention attaches the retention sweeper so /api/health and the preview can report it.
+func (s *Server) SetRetention(sweeper *retention.Sweeper) {
+	s.retention = sweeper
 }
 
 // SetAutoDownloadStatus attaches the capture pool so /api/health can report it. Left unset,
@@ -89,6 +96,9 @@ func (s *Server) registerHandlers() {
 
 	// Health, for deploy checks and monitoring
 	http.HandleFunc("/api/health", CorsMiddleware(s.handleHealth))
+
+	// What retention would remove right now; read-only
+	http.HandleFunc("/api/retention/preview", CorsMiddleware(s.handleRetentionPreview))
 
 	// Chat list, for the UI's trigger picker
 	http.HandleFunc("/api/chats", CorsMiddleware(s.handleChats))

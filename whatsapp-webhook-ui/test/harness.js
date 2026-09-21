@@ -20,6 +20,9 @@ const DEFAULT_ROUTES = {
     '/api/webhooks': { body: { success: true, data: [] } },
     '/api/chats': { body: { success: true, data: [] } },
     '/api/downloads': { body: { success: true, data: [], total: 0 } },
+    '/api/health': {
+        body: { success: true, schema_version: 4, retention: { enabled: true, dry_run: false, interval_minutes: 60 } },
+    },
 };
 
 // settle lets the page's pending promises and zero-delay timers run.

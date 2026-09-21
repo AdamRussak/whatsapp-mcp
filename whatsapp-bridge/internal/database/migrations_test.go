@@ -377,8 +377,10 @@ func TestMigrationV2AddsAutoDownloadColumns(t *testing.T) {
 	if err := db.QueryRow("SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
-		t.Fatalf("schema version = %d, want 3", version)
+	// Latest, whatever that is now: this test is about v2's columns, not about which
+	// migration happens to be newest.
+	if want := migrations[len(migrations)-1].version; version != want {
+		t.Fatalf("schema version = %d, want %d", version, want)
 	}
 	db.Close()
 }

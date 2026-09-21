@@ -241,6 +241,30 @@ within seconds of arrival.
   `store/media.db`. Files are named `<date>_<me|them>_<message id>.ogg`.
 - View-once audio is never captured: no key or URL is stored for it by design.
 
+#### Retention
+A listener can keep its captures for a set number of days ("Keep captured files for" in
+the UI, `retention_days` in the API; blank or 0 keeps them forever). Retention is the only
+code that deletes files, so it keeps a file whenever anything is unclear:
+
+- It only removes files a listener **captured**. Files you fetched by hand
+  (`POST /api/download`, batch jobs) are never touched — nor anything captured before
+  capture logging existed.
+- A file goes only when **every** listener that captured it has an expired retention; one
+  listener that keeps forever, is disabled, or has not yet expired keeps it.
+- Only `.ogg`/`.mp3` files under `store/media/` can be removed, never through a symlink,
+  at most 500 per sweep. Each removal appears as `REMOVED` in that listener's logs, and the
+  record becomes `pruned`, so no batch run downloads it again (`retry_failed` or
+  `"force": true` re-fetches on purpose).
+- It ships in **dry run**. Check `GET /api/retention/preview`, then set
+  `RETENTION_DRY_RUN=false` and redeploy.
+
+To see what retention would do on a later date, against a copy of the store:
+```bash
+STORE_DIR=../store-test go run ./cmd/retention -at 2026-12-01          # read-only
+touch ../store-test/REHEARSAL                                            # opt in to deleting
+STORE_DIR=../store-test go run ./cmd/retention -at 2026-12-01 -apply    # on the copy only
+```
+
 ## 🔧 MCP Tools Reference
 
 ### Core Messaging Tools
@@ -298,9 +322,24 @@ POST /api/download/batch
 GET    /api/download/batch/{job_id}     # progress
 DELETE /api/download/batch/{job_id}     # cancel a running job
 
-# Stream a downloaded file (range requests supported; .ogg/.mp3 only)
+# Stream a downloaded file (range requests supported; .ogg/.mp3 only; ?download=1 to save)
 GET /api/media/{chat}/{filename}
+
+# Downloaded files with the message behind each (chat, after, before, status, limit, offset)
+GET /api/downloads
+
+# Chats for pickers, searchable by name or phone number (q, type=all|contact|group, limit)
+GET /api/chats
+
+# What the next retention sweep would remove — read-only
+GET /api/retention/preview
+
+# Schema version, WhatsApp connection, auto-download pool and retention mode
+GET /api/health
 ```
+
+A download removed by retention returns **410 Gone** from `POST /api/download` unless the
+body sets `"force": true`.
 
 #### Webhook Management
 ```bash
@@ -389,6 +428,12 @@ AUTO_DOWNLOAD=on                 # kill switch for the whole pool; leaves every 
 AUTO_DOWNLOAD_WORKERS=2
 AUTO_DOWNLOAD_QUEUE_SIZE=100
 AUTO_DOWNLOAD_TIMEOUT_S=60
+
+# Retention (how long is set per listener in the UI; these are operational only)
+RETENTION=on                     # off keeps every file, whatever the listeners say
+RETENTION_DRY_RUN=true           # report only; only an explicit false deletes, a typo keeps dry run
+RETENTION_SWEEP_INTERVAL_M=60
+RETENTION_MAX_PER_SWEEP=500      # cap per sweep, oldest expiry first
 
 # MCP Service
 BRIDGE_HOST=whatsapp-bridge

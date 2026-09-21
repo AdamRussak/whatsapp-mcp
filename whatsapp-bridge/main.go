@@ -15,6 +15,7 @@ import (
 	"whatsapp-bridge/internal/autodownload"
 	"whatsapp-bridge/internal/config"
 	"whatsapp-bridge/internal/database"
+	"whatsapp-bridge/internal/retention"
 	"whatsapp-bridge/internal/types"
 	"whatsapp-bridge/internal/webhook"
 	"whatsapp-bridge/internal/whatsapp"
@@ -96,6 +97,20 @@ func main() {
 		logger.Infof("Auto-download disabled (AUTO_DOWNLOAD=off); webhook rules still match and deliver")
 	}
 
+	// Retention: removes a listener's captures once its retention_days have passed. Every
+	// listener defaults to keeping forever, so nothing is removed until one is told to.
+	var sweeper *retention.Sweeper
+	if cfg.RetentionEnabled {
+		sweeper = retention.New(messageStore, mediaStore, cfg.StoreDir, logger, retention.Options{
+			Interval:    time.Duration(cfg.RetentionIntervalMinutes) * time.Minute,
+			MaxPerSweep: cfg.RetentionMaxPerSweep,
+			DryRun:      cfg.RetentionDryRun,
+		})
+		sweeper.Start()
+	} else {
+		logger.Infof("Retention disabled (RETENTION=off); captured files are kept")
+	}
+
 	// Setup event handling for messages, history sync, and media retry
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -129,6 +144,9 @@ func main() {
 	if autoDownloader != nil {
 		server.SetAutoDownloadStatus(autoDownloader)
 	}
+	if sweeper != nil {
+		server.SetRetention(sweeper)
+	}
 	server.Start()
 
 	// Create a channel to keep the main goroutine alive
@@ -147,6 +165,9 @@ func main() {
 	// the room to do that instead of being SIGKILLed mid-file.
 	if autoDownloader != nil {
 		autoDownloader.Stop()
+	}
+	if sweeper != nil {
+		sweeper.Stop()
 	}
 	// Disconnect client
 	client.Disconnect()

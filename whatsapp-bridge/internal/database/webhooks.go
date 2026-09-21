@@ -2,16 +2,18 @@ package database
 
 import (
 	"fmt"
+	"time"
+
 	"whatsapp-bridge/internal/types"
 )
 
 // StoreWebhookConfig stores a webhook configuration in the database
 func (store *MessageStore) StoreWebhookConfig(config *types.WebhookConfig) error {
 	result, err := store.db.Exec(
-		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled, auto_download, auto_download_voice_only)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled, auto_download, auto_download_voice_only, retention_days)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
-		config.AutoDownload, config.VoiceOnly(),
+		config.AutoDownload, config.VoiceOnly(), config.RetentionDays,
 	)
 	if err != nil {
 		return err
@@ -41,11 +43,11 @@ func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error
 	var voiceOnly bool
 	err := store.db.QueryRow(
 		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
-		        auto_download, auto_download_voice_only
+		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0)
 		 FROM webhook_configs WHERE id = ?`, id,
 	).Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
 		&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
-		&config.AutoDownload, &voiceOnly)
+		&config.AutoDownload, &voiceOnly, &config.RetentionDays)
 
 	if err != nil {
 		return nil, err
@@ -65,7 +67,7 @@ func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error
 func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error) {
 	rows, err := store.db.Query(
 		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
-		        auto_download, auto_download_voice_only
+		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0)
 		 FROM webhook_configs ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -76,7 +78,7 @@ func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error
 		var voiceOnly bool
 		err := rows.Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
 			&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
-			&config.AutoDownload, &voiceOnly)
+			&config.AutoDownload, &voiceOnly, &config.RetentionDays)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -111,10 +113,10 @@ func (store *MessageStore) UpdateWebhookConfig(config *types.WebhookConfig) erro
 	// Update the main webhook configuration
 	result, err := tx.Exec(
 		`UPDATE webhook_configs SET name = ?, webhook_url = ?, secret_token = ?,
-		 enabled = ?, auto_download = ?, auto_download_voice_only = ?,
+		 enabled = ?, auto_download = ?, auto_download_voice_only = ?, retention_days = ?,
 		 updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
-		config.AutoDownload, config.VoiceOnly(), config.ID,
+		config.AutoDownload, config.VoiceOnly(), config.RetentionDays, config.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update webhook config: %v", err)
@@ -304,4 +306,39 @@ func eventTypeOrDefault(eventType string) string {
 		return "delivery"
 	}
 	return eventType
+}
+
+// CaptureRecord is one successful auto-download, as logged against the listener that made
+// it. Retention decides from these: they are the only record of *which* listener wanted a
+// file. A file with none — fetched by hand through /api/download or a batch — is never
+// retention's to remove.
+type CaptureRecord struct {
+	RuleID     int
+	MessageID  string
+	ChatJID    string
+	CapturedAt time.Time
+}
+
+// ListCaptures returns every successful capture in webhook_logs. A cached re-capture logs
+// another row, so one file can appear more than once; retention judges every row, which
+// makes the latest capture the one that governs.
+func (store *MessageStore) ListCaptures() ([]CaptureRecord, error) {
+	rows, err := store.db.Query(`SELECT webhook_config_id, message_id, chat_jid, created_at
+		FROM webhook_logs
+		WHERE event_type = 'auto_download' AND delivered_at IS NOT NULL
+		  AND message_id IS NOT NULL AND message_id <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var captures []CaptureRecord
+	for rows.Next() {
+		var c CaptureRecord
+		if err := rows.Scan(&c.RuleID, &c.MessageID, &c.ChatJID, &c.CapturedAt); err != nil {
+			return nil, err
+		}
+		captures = append(captures, c)
+	}
+	return captures, rows.Err()
 }

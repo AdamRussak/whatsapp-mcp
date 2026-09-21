@@ -23,6 +23,12 @@ services:
       # kill switch for the pool that leaves every rule untouched.
       - AUTO_DOWNLOAD=on
       - AUTO_DOWNLOAD_WORKERS=2
+      # Retention removes a listener's captured files after its "Keep for N days". Every
+      # listener keeps forever until you set that. Dry run reports what it would remove —
+      # see GET /api/retention/preview and the bridge log — and deletes nothing. Only an
+      # explicit false turns it off; a typo keeps dry run on.
+      - RETENTION=on
+      - RETENTION_DRY_RUN=true
     restart: unless-stopped
     # Shutdown drains the auto-download queue and closes the databases after whatsmeow
     # disconnects; the default 10s can cut that short (AUDIO_DOWNLOAD_PLAN.md §4.5).

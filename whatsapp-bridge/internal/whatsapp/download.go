@@ -129,7 +129,13 @@ func (c *Client) mediaFolderKey(chatJID, storeDir string) string {
 // DownloadOptions configures media download behavior
 type DownloadOptions struct {
 	SkipMediaRetry bool
+	// Force re-downloads a file that retention removed. Without it a pruned record is
+	// refused, so nothing fetches back what a listener was told to expire.
+	Force bool
 }
+
+// ErrPrunedByRetention is returned for a message whose file retention removed.
+var ErrPrunedByRetention = errors.New("removed by a retention policy; pass force to download it again")
 
 // resolveDirectPath picks the CDN path to download from.
 //
@@ -197,6 +203,15 @@ func (c *Client) DownloadMediaWithOptions(
 	targetPath := filepath.Join(targetDir, filename)
 	absPath, _ := filepath.Abs(targetPath)
 	relPath, _ := filepath.Rel(storeDir, targetPath)
+
+	// 0. A file that retention removed stays removed unless the caller insists. The disk and
+	// cache checks below would otherwise find nothing and quietly download it again.
+	if !opts.Force {
+		if rec, err := mediaStore.GetDownload(messageID, chatJID); err == nil && rec != nil &&
+			rec.Status == database.DownloadStatusPruned {
+			return nil, ErrPrunedByRetention
+		}
+	}
 
 	// 1. Check local disk & mediaStore cache
 	if fi, err := os.Stat(targetPath); err == nil && fi.Size() > 0 {

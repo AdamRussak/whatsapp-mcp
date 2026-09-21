@@ -64,6 +64,8 @@ constructor() {
      before the WhatsApp CDN link expires (~11–19 days)
    - **Voice notes only**: Shown when auto-download is on. Off also captures forwarded
      music and attached audio files
+   - **Keep captured files for N days**: Shown when auto-download is on. Blank keeps them
+     forever. The hint under it says when retention is only a dry run
 3. Configure triggers:
    - **All Messages**: Trigger on every message
    - **Specific Chat**: Trigger for messages from a specific chat JID

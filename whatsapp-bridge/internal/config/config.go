@@ -20,6 +20,13 @@ type Config struct {
 	AutoDownloadWorkers   int
 	AutoDownloadQueueSize int
 	AutoDownloadTimeoutS  int
+
+	// Retention: removes a listener's captures once its retention_days have passed. Which
+	// listeners keep what is set per listener in the UI; these are operational only.
+	RetentionEnabled         bool
+	RetentionDryRun          bool
+	RetentionIntervalMinutes int
+	RetentionMaxPerSweep     int
 }
 
 // NewConfig creates a new configuration with default values and environment overrides
@@ -35,6 +42,11 @@ func NewConfig() *Config {
 		AutoDownloadWorkers:   2,
 		AutoDownloadQueueSize: 100,
 		AutoDownloadTimeoutS:  60,
+
+		RetentionEnabled:         true,
+		RetentionDryRun:          false,
+		RetentionIntervalMinutes: 60,
+		RetentionMaxPerSweep:     500,
 	}
 
 	if portStr := os.Getenv("API_PORT"); portStr != "" {
@@ -85,6 +97,35 @@ func NewConfig() *Config {
 	if timeoutStr := os.Getenv("AUTO_DOWNLOAD_TIMEOUT_S"); timeoutStr != "" {
 		if timeout, err := strconv.Atoi(timeoutStr); err == nil && timeout > 0 {
 			cfg.AutoDownloadTimeoutS = timeout
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RETENTION"))) {
+	case "off", "false", "0", "no", "none":
+		cfg.RetentionEnabled = false
+	}
+
+	// Retention is the only feature that deletes, so a mistake here must fail toward
+	// keeping files: only an explicit "no" turns dry run off. Anything else that is set —
+	// "true", but equally a typo like "ture" — means dry run.
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("RETENTION_DRY_RUN"))); v {
+	case "":
+		// unset: the default
+	case "false", "0", "no", "off":
+		cfg.RetentionDryRun = false
+	default:
+		cfg.RetentionDryRun = true
+	}
+
+	if v := os.Getenv("RETENTION_SWEEP_INTERVAL_M"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.RetentionIntervalMinutes = n
+		}
+	}
+
+	if v := os.Getenv("RETENTION_MAX_PER_SWEEP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.RetentionMaxPerSweep = n
 		}
 	}
 

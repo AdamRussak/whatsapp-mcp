@@ -1,4 +1,4 @@
-package api
+package mediapath
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestResolveMediaPath(t *testing.T) {
+func TestResolve(t *testing.T) {
 	store := t.TempDir()
 	mediaRoot := filepath.Join(store, "media")
 	chatDir := filepath.Join(mediaRoot, "972500000000")
@@ -50,9 +50,9 @@ func TestResolveMediaPath(t *testing.T) {
 		{"", false, ""},
 	}
 	for _, c := range cases {
-		_, ctype, ok := resolveMediaPath(mediaRoot, c.subpath)
+		_, ctype, ok := Resolve(mediaRoot, c.subpath)
 		if ok != c.ok || ctype != c.ctype {
-			t.Errorf("resolveMediaPath(%q) = (%q, %v), want (%q, %v)", c.subpath, ctype, ok, c.ctype, c.ok)
+			t.Errorf("Resolve(%q) = (%q, %v), want (%q, %v)", c.subpath, ctype, ok, c.ctype, c.ok)
 		}
 	}
 }

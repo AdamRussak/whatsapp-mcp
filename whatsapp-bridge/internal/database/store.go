@@ -104,7 +104,8 @@ func createTables(db *sql.DB) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			auto_download BOOLEAN DEFAULT 0,
-			auto_download_voice_only BOOLEAN DEFAULT 1
+			auto_download_voice_only BOOLEAN DEFAULT 1,
+			retention_days INTEGER DEFAULT 0
 		);
 
 		CREATE TABLE IF NOT EXISTS webhook_triggers (
