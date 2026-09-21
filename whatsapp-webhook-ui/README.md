@@ -98,6 +98,17 @@ nothing — only audio is ever queued.
 Rules take effect on the next message; no restart is needed. Operators can stop the pool
 entirely with `AUTO_DOWNLOAD=off` on the bridge, which leaves every rule untouched.
 
+**Seeing captures.** A capture is logged against the listener that made it, so the **📋 Logs**
+button on the card shows them next to that listener's deliveries — a green `CAPTURED` entry
+with the saved path and how long it took, or `CAPTURE FAILED` with the error. A
+download-only listener has no deliveries at all, so its log view shows captures only.
+
+**Phone numbers and LID.** WhatsApp moved 1:1 chats to LID addressing: a contact saved as
+`972547669192` now sends from something like `62156783493249@lid`. Exact **Specific Sender**
+and **Specific Chat** values are expanded through WhatsApp's LID map when rules load, so
+typing the phone number works. Contains and Regex values are used exactly as written, and
+are never expanded.
+
 ### Webhook Triggers
 
 You can configure multiple triggers for each webhook:
