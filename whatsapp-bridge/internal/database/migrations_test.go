@@ -440,3 +440,65 @@ func TestMigrationV3AddsEventTypeToLogs(t *testing.T) {
 		t.Fatalf("event_type = %q, want delivery so old rows keep their meaning", eventType)
 	}
 }
+
+// TestMigrationV5AddsTriggerMode checks ADR 0001's T1: a listener saved before v5 keeps
+// its meaning — it reads "or", which is what every listener did before match modes.
+func TestMigrationV5AddsTriggerMode(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite3", filepath.Join(dir, "messages.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(oldSchema + oldWebhookSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled)
+		VALUES (?, ?, ?, ?)`, "existing", "https://example.com/hook", "s3cret", true); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	store, err := NewMessageStoreWithDir(dir)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	defer store.Close()
+
+	if v, err := store.SchemaVersion(); err != nil || v != 5 {
+		t.Fatalf("SchemaVersion() = %d, %v; want 5", v, err)
+	}
+
+	config, err := store.GetWebhookConfig(1)
+	if err != nil {
+		t.Fatalf("reading the migrated listener: %v", err)
+	}
+	if config.Name != "existing" || config.WebhookURL != "https://example.com/hook" ||
+		config.SecretToken != "s3cret" || !config.Enabled {
+		t.Fatalf("the migration rewrote an existing listener: %+v", config)
+	}
+	if config.TriggerMode != "or" {
+		t.Fatalf("trigger_mode = %q, want or", config.TriggerMode)
+	}
+}
+
+// A fresh database is created at v5 with the column already in place.
+func TestFreshDatabaseHasTriggerMode(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if v, err := store.SchemaVersion(); err != nil || v != 5 {
+		t.Fatalf("SchemaVersion() = %d, %v; want 5", v, err)
+	}
+	var dflt sql.NullString
+	if err := store.GetDB().QueryRow(
+		`SELECT dflt_value FROM pragma_table_info('webhook_configs') WHERE name = 'trigger_mode'`,
+	).Scan(&dflt); err != nil {
+		t.Fatalf("fresh webhook_configs has no trigger_mode: %v", err)
+	}
+	if dflt.String != "'or'" {
+		t.Fatalf("trigger_mode default = %q, want 'or'", dflt.String)
+	}
+}

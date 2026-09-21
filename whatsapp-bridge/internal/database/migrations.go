@@ -71,6 +71,18 @@ var migrations = []migration{
 			})
 		},
 	},
+	{
+		version: 5,
+		name:    "trigger match mode on webhook configs",
+		apply: func(tx *sql.Tx) error {
+			// How a listener's triggers combine: 'or' fires on any of them, 'and' on all
+			// (ADR 0001). The default is today's behaviour, so every existing listener keeps
+			// its meaning, and a v4 binary can still read the table after this runs.
+			return addColumns(tx, "webhook_configs", []column{
+				{"trigger_mode", "TEXT DEFAULT 'or'"},
+			})
+		},
+	},
 }
 
 type column struct {

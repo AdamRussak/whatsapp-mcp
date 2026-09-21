@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WhatsApp Webhook Manager</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=10">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
 </head>
 
@@ -185,34 +185,26 @@
 
                 <div class="form-group">
                     <label>Triggers</label>
-                    <div id="triggersContainer">
-                        <div class="trigger-item">
-                            <select name="trigger_type" class="trigger-type">
-                                <option value="all">All Messages</option>
-                                <option value="chat_jid">Specific Chat</option>
-                                <option value="sender">Specific Sender</option>
-                                <option value="keyword">Keyword</option>
-                                <option value="media_type">Media Type</option>
-                            </select>
-                            <input type="text" name="trigger_value" class="trigger-value" placeholder="Trigger value">
-                            <select name="match_type" class="match-type">
-                                <option value="exact">Exact</option>
-                                <option value="contains">Contains</option>
-                                <option value="regex">Regex</option>
-                            </select>
-                            <button type="button" class="btn-remove-trigger" title="Remove trigger">
-                                <i class="fas fa-trash"></i>
-                            </button>
-                        </div>
+                    <div class="inline-field trigger-mode-field">
+                        <label for="triggerMode">Match</label>
+                        <select id="triggerMode" name="trigger_mode">
+                            <option value="or">OR: any trigger</option>
+                            <option value="and">AND: every trigger</option>
+                        </select>
                     </div>
+                    <!-- Rows come from WebhookManager.addTriggerRow, the one place their markup lives. -->
+                    <div id="triggersContainer"></div>
                     <button type="button" id="addTriggerBtn" class="btn btn-outline">
                         <i class="fas fa-plus"></i> Add Trigger
                     </button>
+                    <p id="triggerSummary" class="trigger-summary" aria-live="polite"></p>
                 </div>
+
+                <div id="formErrors" class="form-errors" role="alert" hidden></div>
 
                 <div class="modal-actions">
                     <button type="button" id="cancelBtn" class="btn btn-secondary">Cancel</button>
-                    <button type="submit" class="btn btn-primary">
+                    <button type="submit" id="submitBtn" class="btn btn-primary">
                         <span id="submitText">Create Webhook</span>
                     </button>
                 </div>
@@ -345,7 +337,7 @@
         <button id="toastClose" class="toast-close">&times;</button>
     </div>
 
-    <script src="script.js?v=9"></script>
+    <script src="script.js?v=10"></script>
 </body>
 
 </html>

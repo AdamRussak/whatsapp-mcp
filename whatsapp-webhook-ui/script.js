@@ -14,6 +14,10 @@ class WebhookManager {
         this.currentEditingId = null;
         this.currentLogsWebhookId = null;
         this.chatPickerSeq = 0;
+        // Live validation of the listener form against POST /api/webhooks/validate. seq
+        // discards a response that a newer edit has overtaken.
+        this.validation = { seq: 0, timer: null, inFlight: false, errors: [] };
+        this.validateDelayMs = 300;
         this.downloads = { offset: 0, limit: 25, total: 0, loaded: false };
         this.init();
     }
@@ -76,7 +80,16 @@ class WebhookManager {
         document.getElementById('autoDownload').addEventListener('change', () => this.syncAutoDownloadFields());
 
         // Add trigger button
-        document.getElementById('addTriggerBtn').addEventListener('click', () => this.addTriggerRow());
+        document.getElementById('addTriggerBtn').addEventListener('click', () => {
+            this.addTriggerRow();
+            this.onFormEdited();
+        });
+
+        // Any edit to the form rebuilds the trigger sentence and re-validates. Both events
+        // bubble from every field, the trigger rows and the Match selector included.
+        const form = document.getElementById('webhookForm');
+        form.addEventListener('input', () => this.onFormEdited());
+        form.addEventListener('change', () => this.onFormEdited());
 
         // Toast close
         document.getElementById('toastClose').addEventListener('click', () => this.hideToast());
@@ -118,8 +131,9 @@ class WebhookManager {
             }
         });
 
-        // Setup initial trigger row event listener
-        this.setupTriggerRowListeners(document.querySelector('.trigger-item'));
+        // The form starts with one trigger row
+        this.addTriggerRow();
+        this.updateTriggerSummary();
     }
 
     async loadWebhooks() {
@@ -207,7 +221,7 @@ class WebhookManager {
         statusElement.className = `webhook-status ${webhook.enabled ? 'enabled' : 'disabled'}`;
         
         // Triggers
-        const triggersText = this.formatTriggers(webhook.triggers);
+        const triggersText = this.formatTriggers(webhook.triggers, webhook.trigger_mode);
         clone.querySelector('.webhook-triggers').textContent = triggersText;
         
         // Setup action buttons
@@ -232,17 +246,19 @@ class WebhookManager {
         }
     }
 
-    formatTriggers(triggers) {
+    formatTriggers(triggers, mode = 'or') {
         if (!triggers || triggers.length === 0) {
             return 'No triggers configured';
         }
         
-        return triggers.map(trigger => {
+        const text = triggers.map(trigger => {
             if (trigger.trigger_type === 'all') {
                 return 'All messages';
             }
             return `${trigger.trigger_type}: ${trigger.trigger_value}`;
         }).join(', ');
+        // Only AND is spelled out: OR is what every listener did before match modes.
+        return mode === 'and' && triggers.length > 1 ? `All of: ${text}` : text;
     }
 
     openModal(webhook = null) {
@@ -261,6 +277,15 @@ class WebhookManager {
             submitText.textContent = 'Create Webhook';
             this.resetForm();
         }
+
+        this.cancelValidation();
+        this.renderValidationErrors([]);
+        this.updateTriggerSummary();
+        // An existing listener is checked straight away, so one the rules now reject says
+        // why before anyone edits it. A new, empty form is left alone until it is touched.
+        if (webhook) {
+            this.scheduleValidation();
+        }
         
         modal.style.display = 'block';
     }
@@ -269,6 +294,7 @@ class WebhookManager {
         const modal = document.getElementById('webhookModal');
         modal.style.display = 'none';
         this.currentEditingId = null;
+        this.cancelValidation();
     }
 
     resetForm() {
@@ -279,29 +305,11 @@ class WebhookManager {
         document.getElementById('retentionDays').value = '';
         this.syncAutoDownloadFields();
         
+        document.getElementById('triggerMode').value = 'or';
+
         // Reset triggers to one default row
-        const container = document.getElementById('triggersContainer');
-        container.innerHTML = `
-            <div class="trigger-item">
-                <select name="trigger_type" class="trigger-type">
-                    <option value="all">All Messages</option>
-                    <option value="chat_jid">Specific Chat</option>
-                    <option value="sender">Specific Sender</option>
-                    <option value="keyword">Keyword</option>
-                    <option value="media_type">Media Type</option>
-                </select>
-                <input type="text" name="trigger_value" class="trigger-value" placeholder="Trigger value">
-                <select name="match_type" class="match-type">
-                    <option value="exact">Exact</option>
-                    <option value="contains">Contains</option>
-                    <option value="regex">Regex</option>
-                </select>
-                <button type="button" class="btn-remove-trigger" title="Remove trigger">
-                    <i class="fas fa-trash"></i>
-                </button>
-            </div>
-        `;
-        this.setupTriggerRowListeners(container.querySelector('.trigger-item'));
+        document.getElementById('triggersContainer').innerHTML = '';
+        this.addTriggerRow();
     }
 
     // syncAutoDownloadFields keeps the form honest about what auto-download changes: the
@@ -332,6 +340,7 @@ class WebhookManager {
         document.getElementById('autoDownload').checked = !!webhook.auto_download;
         document.getElementById('autoDownloadVoiceOnly').checked = webhook.auto_download_voice_only !== false;
         document.getElementById('retentionDays').value = webhook.retention_days > 0 ? String(webhook.retention_days) : '';
+        document.getElementById('triggerMode').value = webhook.trigger_mode === 'and' ? 'and' : 'or';
         this.syncAutoDownloadFields();
         
         // Populate triggers
@@ -347,9 +356,10 @@ class WebhookManager {
         }
     }
 
-    addTriggerRow(triggerData = null) {
-        const container = document.getElementById('triggersContainer');
-        const triggerHtml = `
+    // triggerRowHtml is the one place a trigger row's markup lives. The .trigger-error slot
+    // is where validation puts a problem with this row.
+    triggerRowHtml() {
+        return `
             <div class="trigger-item">
                 <select name="trigger_type" class="trigger-type">
                     <option value="all">All Messages</option>
@@ -367,16 +377,27 @@ class WebhookManager {
                 <button type="button" class="btn-remove-trigger" title="Remove trigger">
                     <i class="fas fa-trash"></i>
                 </button>
+                <small class="trigger-error" hidden></small>
             </div>
         `;
-        
-        container.insertAdjacentHTML('beforeend', triggerHtml);
+    }
+
+    addTriggerRow(triggerData = null) {
+        const container = document.getElementById('triggersContainer');
+        container.insertAdjacentHTML('beforeend', this.triggerRowHtml());
         const newRow = container.lastElementChild;
         
         if (triggerData) {
             newRow.querySelector('.trigger-type').value = triggerData.trigger_type;
             newRow.querySelector('.trigger-value').value = triggerData.trigger_value;
             newRow.querySelector('.match-type').value = triggerData.match_type;
+            // The form has no switch for this, so a disabled trigger stays disabled on save
+            // rather than coming back to life.
+            if (triggerData.enabled === false) {
+                newRow.dataset.enabled = 'false';
+                newRow.classList.add('trigger-disabled');
+                newRow.title = 'This trigger is disabled and is ignored';
+            }
         }
         
         this.setupTriggerRowListeners(newRow);
@@ -391,6 +412,10 @@ class WebhookManager {
             const container = document.getElementById('triggersContainer');
             if (container.children.length > 1) {
                 triggerRow.remove();
+                // Rows below this one have moved up, so the problems drawn on them no longer
+                // line up with trigger_index. Drop them until the new answer arrives.
+                this.renderValidationErrors([]);
+                this.onFormEdited();
             }
         });
         
@@ -661,19 +686,17 @@ class WebhookManager {
 
     async handleFormSubmit(e) {
         e.preventDefault();
+
+        // Save is disabled in these states, but a form can be submitted without its button
+        // (Enter in a field, or a test), so the refusal lives here too.
+        if (this.validationBlocksSave()) {
+            this.showToast(this.validation.errors.length > 0
+                ? 'Fix the problems shown in the form before saving'
+                : 'Still checking the triggers — try again in a moment', 'error');
+            return;
+        }
         
-        const formData = new FormData(e.target);
-        const webhook = {
-            name: formData.get('name')?.trim(),
-            webhook_url: formData.get('webhook_url')?.trim(),
-            secret_token: formData.get('secret_token')?.trim() || '',
-            enabled: document.getElementById('webhookEnabled').checked,
-            auto_download: document.getElementById('autoDownload').checked,
-            auto_download_voice_only: document.getElementById('autoDownloadVoiceOnly').checked,
-            // Blank means keep forever, sent as 0.
-            retention_days: parseInt(document.getElementById('retentionDays').value, 10) || 0,
-            triggers: this.collectTriggers()
-        };
+        const webhook = this.buildWebhookPayload();
         
         // Validation
         if (!webhook.name) {
@@ -711,29 +734,175 @@ class WebhookManager {
         }
     }
 
+    // buildWebhookPayload is what a save sends, and what live validation checks: the two
+    // must be the same body, or the form's feedback and the save could disagree.
+    buildWebhookPayload() {
+        return {
+            name: document.getElementById('webhookName').value.trim(),
+            webhook_url: document.getElementById('webhookURL').value.trim(),
+            secret_token: document.getElementById('secretToken').value.trim(),
+            enabled: document.getElementById('webhookEnabled').checked,
+            auto_download: document.getElementById('autoDownload').checked,
+            auto_download_voice_only: document.getElementById('autoDownloadVoiceOnly').checked,
+            // Blank means keep forever, sent as 0.
+            retention_days: parseInt(document.getElementById('retentionDays').value, 10) || 0,
+            trigger_mode: document.getElementById('triggerMode').value,
+            triggers: this.collectTriggers()
+        };
+    }
+
+    // collectTriggers returns one trigger per visible row, in order. Rows with no value are
+    // sent too, not dropped: the bridge reports problems by trigger_index, which must stay
+    // the index of the row the user sees. An empty value is one of those problems.
     collectTriggers() {
-        const triggers = [];
-        const triggerRows = document.querySelectorAll('.trigger-item');
-        
-        triggerRows.forEach(row => {
+        return Array.from(document.querySelectorAll('#triggersContainer .trigger-item')).map(row => {
             const type = row.querySelector('.trigger-type').value;
             const value = row.querySelector('.trigger-value').value?.trim() || '';
-            const matchType = row.querySelector('.match-type').value;
-            
-            // For "all" type, we don't need a value
-            // For other types, we need a value
-            if (type === 'all' || (type !== 'all' && value)) {
-                triggers.push({
-                    trigger_type: type,
-                    trigger_value: type === 'all' ? '' : value,
-                    match_type: matchType,
-                    enabled: true
-                });
+            return {
+                trigger_type: type,
+                trigger_value: type === 'all' ? '' : value,
+                match_type: row.querySelector('.match-type').value,
+                enabled: row.dataset.enabled !== 'false'
+            };
+        });
+    }
+
+    // onFormEdited runs on every change to the listener form.
+    onFormEdited() {
+        this.updateTriggerSummary();
+        this.scheduleValidation();
+    }
+
+    // scheduleValidation debounces a check of the form, as the chat picker debounces its
+    // search. Save stays disabled until the answer is in.
+    scheduleValidation() {
+        // A check already on the wire is now for an older form. Advancing seq makes its
+        // answer drop on arrival instead of painting stale errors; inFlight stays set, so
+        // Save stays blocked until the new check answers.
+        if (this.validation.inFlight) {
+            this.validation.seq++;
+        }
+        clearTimeout(this.validation.timer);
+        this.validation.timer = setTimeout(() => {
+            this.validation.timer = null;
+            this.runValidation();
+        }, this.validateDelayMs);
+        this.updateSaveState();
+    }
+
+    cancelValidation() {
+        clearTimeout(this.validation.timer);
+        this.validation.timer = null;
+        this.validation.seq++;
+        this.validation.inFlight = false;
+        this.updateSaveState();
+    }
+
+    async runValidation() {
+        const seq = ++this.validation.seq;
+        this.validation.inFlight = true;
+        this.updateSaveState();
+
+        let errors = [];
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/webhooks/validate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(this.buildWebhookPayload())
+            });
+            if (response.status === 400) {
+                const data = await response.json();
+                errors = Array.isArray(data.errors) && data.errors.length > 0
+                    ? data.errors
+                    : [{ rule: '', trigger_index: -1, message: data.error || 'The bridge rejected this listener' }];
+            }
+            // Anything else (an older bridge without the endpoint, a 5xx) must not lock the
+            // form: the bridge validates the save regardless.
+        } catch (error) {
+            console.error('Validation request failed:', error);
+        }
+
+        if (seq !== this.validation.seq) {
+            return; // a newer edit has made this answer stale; its own check will land
+        }
+        this.validation.inFlight = false;
+        this.renderValidationErrors(errors);
+    }
+
+    validationBlocksSave() {
+        const v = this.validation;
+        return v.errors.length > 0 || v.inFlight || v.timer !== null;
+    }
+
+    updateSaveState() {
+        document.getElementById('submitBtn').disabled = this.validationBlocksSave();
+    }
+
+    // renderValidationErrors draws each problem on the trigger row it names; one with
+    // trigger_index -1 (or a row that no longer exists) is shown for the form as a whole.
+    renderValidationErrors(errors) {
+        this.validation.errors = errors;
+        const rows = document.querySelectorAll('#triggersContainer .trigger-item');
+        rows.forEach(row => {
+            const slot = row.querySelector('.trigger-error');
+            slot.textContent = '';
+            slot.hidden = true;
+            row.classList.remove('has-error');
+        });
+
+        const formErrors = document.getElementById('formErrors');
+        formErrors.innerHTML = '';
+        errors.forEach(error => {
+            const row = error.trigger_index >= 0 ? rows[error.trigger_index] : null;
+            const line = document.createElement('div');
+            line.textContent = error.message;
+            if (row) {
+                const slot = row.querySelector('.trigger-error');
+                slot.appendChild(line);
+                slot.hidden = false;
+                row.classList.add('has-error');
+            } else {
+                formErrors.appendChild(line);
             }
         });
-        
-        console.log('Collected triggers:', triggers); // Debug log
-        return triggers;
+        formErrors.hidden = formErrors.childElementCount === 0;
+        this.updateSaveState();
+    }
+
+    // updateTriggerSummary says in plain words which messages fire the listener. Under OR it
+    // exposes the union ("media type is audio, or chat is A") before anyone saves a listener
+    // expecting both at once.
+    updateTriggerSummary() {
+        const mode = document.getElementById('triggerMode').value;
+        const triggers = this.collectTriggers().filter(t => t.enabled);
+        const summary = document.getElementById('triggerSummary');
+
+        const hasAll = triggers.some(t => t.trigger_type === 'all');
+        const clauses = triggers
+            .filter(t => t.trigger_type !== 'all' && t.trigger_value)
+            .map(t => this.describeTrigger(t));
+
+        if (hasAll && (mode === 'or' || clauses.length === 0)) {
+            // Under OR "all" swallows everything else; under AND it adds no requirement.
+            summary.textContent = 'Fires for every message.';
+        } else if (clauses.length === 0) {
+            summary.textContent = 'Add a trigger to choose which messages fire this listener.';
+        } else {
+            const conjunction = mode === 'and' ? 'and' : 'or';
+            const joined = clauses.length === 1
+                ? clauses[0]
+                : `${clauses.slice(0, -1).join(', ')}, ${conjunction} ${clauses[clauses.length - 1]}`;
+            summary.textContent = `Fires for messages where ${joined}.`;
+        }
+    }
+
+    describeTrigger(trigger) {
+        const field = { chat_jid: 'chat', sender: 'sender', keyword: 'the text', media_type: 'media type' }[trigger.trigger_type] || trigger.trigger_type;
+        switch (trigger.match_type) {
+            case 'contains': return `${field} contains "${trigger.trigger_value}"`;
+            case 'regex': return `${field} matches ${trigger.trigger_value}`;
+            default: return `${field} is ${trigger.trigger_type === 'keyword' ? `"${trigger.trigger_value}"` : trigger.trigger_value}`;
+        }
     }
 
     async createWebhook(webhook) {
@@ -755,6 +924,7 @@ class WebhookManager {
                 try {
                     const errorData = await response.json();
                     errorMessage = errorData.error || errorData.message || errorMessage;
+                    this.showSaveErrors(errorData);
                 } catch (e) {
                     // If response is not JSON, use status text
                     errorMessage = response.statusText || errorMessage;
@@ -774,6 +944,15 @@ class WebhookManager {
         }
     }
 
+    // showSaveErrors draws a rejected save's errors on the form, the same way live
+    // validation does, so a problem the form had not caught yet still lands on its row.
+    showSaveErrors(body) {
+        if (body && Array.isArray(body.errors) && body.errors.length > 0) {
+            this.cancelValidation();
+            this.renderValidationErrors(body.errors);
+        }
+    }
+
     async updateWebhook(webhook) {
         try {
             const response = await fetch(`${this.apiBaseUrl}/webhooks/${webhook.id}`, {
@@ -786,6 +965,7 @@ class WebhookManager {
             
             if (!response.ok) {
                 const error = await response.json();
+                this.showSaveErrors(error);
                 throw new Error(error.error || `HTTP error! status: ${response.status}`);
             }
             

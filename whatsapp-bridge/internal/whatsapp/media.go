@@ -83,6 +83,19 @@ func ExtractPollInfo(msg *waProto.Message) *types.PollInfo {
 	}
 }
 
+// ProducedMediaTypes is every media type ExtractMediaInfo can return, other than "" for a
+// plain text message. It is a closed set: listener validation (ADR 0001) rejects a trigger
+// that could only match a type outside it. Keep it in step with ExtractMediaInfo; a test
+// checks that every type it returns is listed here.
+var ProducedMediaTypes = []string{"audio", "document", "image", "poll", "poll_vote", "video"}
+
+// CarriesText reports whether a message of this media type has text ExtractTextContent
+// reads: plain text ("") and a poll's question. Captions are not read, and a poll vote or
+// view-once audio has none.
+func CarriesText(mediaType string) bool {
+	return mediaType == "" || mediaType == "poll"
+}
+
 // ExtractMediaInfo extracts media information from a WhatsApp message.
 //
 // msgID names the file for audio, so two voice notes in the same second no longer

@@ -18,6 +18,7 @@ import (
 	"whatsapp-bridge/internal/mediapath"
 	"whatsapp-bridge/internal/retention"
 	"whatsapp-bridge/internal/types"
+	"whatsapp-bridge/internal/webhook"
 	"whatsapp-bridge/internal/whatsapp"
 )
 
@@ -91,7 +92,7 @@ func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request) {
 
 		// Validate configuration
 		if err := s.webhookManager.ValidateWebhookConfig(&config); err != nil {
-			SendJSONError(w, err.Error(), http.StatusBadRequest)
+			sendValidationErrors(w, err)
 			return
 		}
 
@@ -112,6 +113,47 @@ func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request) {
 	default:
 		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleValidateWebhook runs the save-time validation without saving (ADR 0001), so the
+// form can show problems as triggers change. One implementation on the server means the
+// form's feedback and the save can never disagree.
+func (s *Server) handleValidateWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var config types.WebhookConfig
+	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+		SendJSONError(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.webhookManager.ValidateWebhookConfig(&config); err != nil {
+		sendValidationErrors(w, err)
+		return
+	}
+	SendJSON(w, map[string]interface{}{
+		"success": true,
+		"errors":  []webhook.ValidationError{},
+	})
+}
+
+// sendValidationErrors answers a rejected listener with a 400 listing every failure. The
+// "error" string is the first message, so clients that only read that keep working.
+func sendValidationErrors(w http.ResponseWriter, err error) {
+	var errs webhook.ValidationErrors
+	if !errors.As(err, &errs) || len(errs) == 0 {
+		errs = webhook.ValidationErrors{{TriggerIndex: -1, Message: err.Error()}}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   errs[0].Message,
+		"errors":  errs,
+	})
 }
 
 // handleWebhookByID handles individual webhook operations
@@ -167,7 +209,7 @@ func (s *Server) handleWebhookByID(w http.ResponseWriter, r *http.Request) {
 
 			// Validate configuration
 			if err := s.webhookManager.ValidateWebhookConfig(&config); err != nil {
-				SendJSONError(w, err.Error(), http.StatusBadRequest)
+				sendValidationErrors(w, err)
 				return
 			}
 

@@ -10,10 +10,10 @@ import (
 // StoreWebhookConfig stores a webhook configuration in the database
 func (store *MessageStore) StoreWebhookConfig(config *types.WebhookConfig) error {
 	result, err := store.db.Exec(
-		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled, auto_download, auto_download_voice_only, retention_days)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO webhook_configs (name, webhook_url, secret_token, enabled, auto_download, auto_download_voice_only, retention_days, trigger_mode)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
-		config.AutoDownload, config.VoiceOnly(), config.RetentionDays,
+		config.AutoDownload, config.VoiceOnly(), config.RetentionDays, config.Mode(),
 	)
 	if err != nil {
 		return err
@@ -43,11 +43,12 @@ func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error
 	var voiceOnly bool
 	err := store.db.QueryRow(
 		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
-		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0)
+		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0),
+		        COALESCE(trigger_mode, 'or')
 		 FROM webhook_configs WHERE id = ?`, id,
 	).Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
 		&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
-		&config.AutoDownload, &voiceOnly, &config.RetentionDays)
+		&config.AutoDownload, &voiceOnly, &config.RetentionDays, &config.TriggerMode)
 
 	if err != nil {
 		return nil, err
@@ -67,7 +68,8 @@ func (store *MessageStore) GetWebhookConfig(id int) (*types.WebhookConfig, error
 func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error) {
 	rows, err := store.db.Query(
 		`SELECT id, name, webhook_url, secret_token, enabled, created_at, updated_at,
-		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0)
+		        auto_download, auto_download_voice_only, COALESCE(retention_days, 0),
+		        COALESCE(trigger_mode, 'or')
 		 FROM webhook_configs ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -78,7 +80,7 @@ func (store *MessageStore) GetAllWebhookConfigs() ([]*types.WebhookConfig, error
 		var voiceOnly bool
 		err := rows.Scan(&config.ID, &config.Name, &config.WebhookURL, &config.SecretToken,
 			&config.Enabled, &config.CreatedAt, &config.UpdatedAt,
-			&config.AutoDownload, &voiceOnly, &config.RetentionDays)
+			&config.AutoDownload, &voiceOnly, &config.RetentionDays, &config.TriggerMode)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -114,9 +116,9 @@ func (store *MessageStore) UpdateWebhookConfig(config *types.WebhookConfig) erro
 	result, err := tx.Exec(
 		`UPDATE webhook_configs SET name = ?, webhook_url = ?, secret_token = ?,
 		 enabled = ?, auto_download = ?, auto_download_voice_only = ?, retention_days = ?,
-		 updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		 trigger_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		config.Name, config.WebhookURL, config.SecretToken, config.Enabled,
-		config.AutoDownload, config.VoiceOnly(), config.RetentionDays, config.ID,
+		config.AutoDownload, config.VoiceOnly(), config.RetentionDays, config.Mode(), config.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update webhook config: %v", err)
@@ -215,11 +217,12 @@ func (store *MessageStore) StoreWebhookTrigger(trigger *types.WebhookTrigger) er
 	return nil
 }
 
-// GetWebhookTriggers retrieves all triggers for a webhook config
+// GetWebhookTriggers retrieves all triggers for a webhook config, in the order they were
+// saved. The order is what "the first matching trigger" in a payload refers to.
 func (store *MessageStore) GetWebhookTriggers(webhookConfigID int) ([]types.WebhookTrigger, error) {
 	rows, err := store.db.Query(
 		`SELECT id, webhook_config_id, trigger_type, trigger_value, match_type, enabled 
-		 FROM webhook_triggers WHERE webhook_config_id = ?`, webhookConfigID,
+		 FROM webhook_triggers WHERE webhook_config_id = ? ORDER BY id`, webhookConfigID,
 	)
 	if err != nil {
 		return nil, err
