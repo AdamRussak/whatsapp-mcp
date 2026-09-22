@@ -12,8 +12,10 @@
 //     disabled, or has not yet expired keeps the file. So does a re-capture, which resets
 //     that listener's clock.
 //   - The path goes through mediapath.Resolve — the same gate /api/media/ serves through —
-//     and must additionally be a regular file, not a symlink. Only .ogg and .mp3 under
-//     store/media/ can ever be removed; never index.json, never a database.
+//     and must additionally be a regular file, not a symlink. Only the media extensions
+//     that gate allows (audio, and the images and videos of ADR 0002) under store/media/
+//     can ever be removed; never index.json, never a database. Only captured files are
+//     candidates, and auto-download captures only audio, so in practice that is audio.
 //   - At most MaxPerSweep files per sweep, oldest expiry first, so one misconfigured
 //     listener cannot empty the archive in a single pass.
 //   - Every removal marks the media.db record pruned (so nothing downloads it again) and

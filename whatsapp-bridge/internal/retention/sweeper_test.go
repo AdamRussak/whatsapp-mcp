@@ -374,3 +374,28 @@ func TestOrphanedCaptureKeepsTheFile(t *testing.T) {
 		t.Fatal("a file with no captures at all was treated as due")
 	}
 }
+
+// The sweep deletes through the same gate that serves, so an image a listener captured is
+// removable like a voice note (ADR 0002, T4). Auto-download captures only audio today, so
+// in practice no image is captured; this pins that the gate would not block it.
+func TestExpiredImageCaptureIsRemoved(t *testing.T) {
+	f := newFixture(t)
+	rule := f.listener("Photos", true, 30)
+	rel := filepath.Join("media", "972547669192", "PHOTO.jpg")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(f.dir, rel)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, rel), []byte("\xff\xd8"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f.record("PHOTO", rel)
+	f.capture(rule, "PHOTO", daysAgo(31))
+
+	if r := f.sweep(Options{}); r.Removed != 1 {
+		t.Fatalf("result = %+v, want 1 removed", r)
+	}
+	if f.exists(rel) {
+		t.Fatal("the expired photo is still on disk")
+	}
+	f.sessionIntact()
+}

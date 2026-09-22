@@ -4,7 +4,7 @@
 // It serves two callers that must agree exactly: GET /api/media/ streams what it resolves,
 // and retention deletes what it resolves. A second copy of this logic in either place would
 // be a second chance to get it wrong, and for retention "wrong" means deleting the WhatsApp
-// session database — which a symlink disguised as audio would otherwise point at.
+// session database — which a symlink disguised as media would otherwise point at.
 package mediapath
 
 import (
@@ -14,15 +14,23 @@ import (
 )
 
 // servableTypes maps the only file extensions that may be served — or deleted — to their
-// content types.
+// content types: the audio the downloader writes, and since ADR 0002 (T4) the images and
+// videos it writes. Adding an extension here lets retention delete it too, which is the
+// point: a downloaded file that could never be swept would pile up forever.
 var servableTypes = map[string]string{
-	".ogg": "audio/ogg; codecs=opus",
-	".mp3": "audio/mpeg",
+	".ogg":  "audio/ogg; codecs=opus",
+	".mp3":  "audio/mpeg",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".png":  "image/png",
+	".webp": "image/webp",
+	".gif":  "image/gif",
+	".mp4":  "video/mp4",
 }
 
 // Resolve maps a subpath to a regular file inside mediaRoot. It rejects traversal,
-// absolute paths, symlinks leaving mediaRoot, and any extension other than .ogg/.mp3, so the
-// databases and other files in the store directory can never be served.
+// absolute paths, symlinks leaving mediaRoot, and any extension not in servableTypes, so
+// the databases, index.json and other files in the store directory can never be served.
 func Resolve(mediaRoot, subpath string) (string, string, bool) {
 	if subpath == "" || strings.Contains(subpath, "\\") {
 		return "", "", false

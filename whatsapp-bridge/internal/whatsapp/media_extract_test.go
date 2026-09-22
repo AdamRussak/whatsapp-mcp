@@ -102,8 +102,9 @@ func TestExtractMediaInfoAudio(t *testing.T) {
 	})
 }
 
-// TestExtractMediaInfoOtherTypes pins the behaviour of the non-audio branches, which the
-// schema-v1 change must leave alone.
+// TestExtractMediaInfoOtherTypes pins the media type of the non-audio branches. Image,
+// video and document may carry direct_path and mimetype, and video seconds (ADR 0002);
+// captions_test.go checks those. is_ptt stays audio-only.
 func TestExtractMediaInfoOtherTypes(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -123,8 +124,8 @@ func TestExtractMediaInfoOtherTypes(t *testing.T) {
 			if meta.MediaType != tc.mediaType {
 				t.Errorf("MediaType = %q, want %q", meta.MediaType, tc.mediaType)
 			}
-			// Only audio carries the v1 fields
-			if meta.IsPTT || meta.Seconds != 0 || meta.DirectPath != "" {
+			// Only audio is a voice note; none of these messages set a duration
+			if meta.IsPTT || meta.Seconds != 0 {
 				t.Errorf("non-audio carried audio metadata: %+v", meta)
 			}
 		})

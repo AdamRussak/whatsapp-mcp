@@ -49,8 +49,8 @@ type DownloadResult struct {
 	Path      string `json:"path"`       // relative to storeDir, e.g. media/972527872233/...ogg
 	AbsPath   string `json:"abs_path"`   // absolute file path on disk
 	Filename  string `json:"filename"`   // filename on disk
-	MediaType string `json:"media_type"` // "audio"
-	Mimetype  string `json:"mimetype"`   // "audio/ogg; codecs=opus"
+	MediaType string `json:"media_type"` // "audio", "image" or "video"
+	Mimetype  string `json:"mimetype"`   // e.g. "audio/ogg; codecs=opus", "image/jpeg"
 	Cached    bool   `json:"cached"`     // whether file was already cached on disk
 	Size      int    `json:"size"`       // size in bytes
 	SHA256    string `json:"sha256"`     // hex sha256
@@ -153,7 +153,40 @@ func resolveDirectPath(info *database.MediaInfo) string {
 	return ExtractDirectPathFromURL(info.URL)
 }
 
-// DownloadMedia downloads an audio message, checking cache, downloading from WhatsApp,
+// downloadKind is how one stored media type is fetched and named on disk.
+type downloadKind struct {
+	waType   whatsmeow.MediaType
+	ext      string
+	mimetype string
+}
+
+// downloadKindFor says how a message's media is downloaded, or false when its type cannot
+// be (ADR 0002, T4: audio, image and video; not document, poll or text).
+//
+// Audio keeps the name and mimetype it has always had (.ogg, "audio/ogg; codecs=opus"), so
+// files already on disk and their media.db records still match. An image or video takes its
+// extension from the stored mimetype, falling back to .jpg or .mp4 when the row has none
+// (rows stored before ADR 0002).
+func downloadKindFor(info *database.MediaInfo) (downloadKind, bool) {
+	switch info.MediaType {
+	case "audio":
+		return downloadKind{whatsmeow.MediaAudio, ".ogg", "audio/ogg; codecs=opus"}, true
+	case "image":
+		return downloadKind{whatsmeow.MediaImage, MediaExtension(info.Mimetype, ".jpg"), mimetypeOr(info.Mimetype, "image/jpeg")}, true
+	case "video":
+		return downloadKind{whatsmeow.MediaVideo, MediaExtension(info.Mimetype, ".mp4"), mimetypeOr(info.Mimetype, "video/mp4")}, true
+	}
+	return downloadKind{}, false
+}
+
+func mimetypeOr(mimetype, fallback string) string {
+	if mimetype == "" {
+		return fallback
+	}
+	return mimetype
+}
+
+// DownloadMedia downloads an audio, image or video message, checking cache, downloading from WhatsApp,
 // and triggering media-retry receipts if CDN tokens are expired.
 func (c *Client) DownloadMedia(
 	ctx context.Context,
@@ -164,7 +197,8 @@ func (c *Client) DownloadMedia(
 	return c.DownloadMediaWithOptions(ctx, mediaStore, messageStore, messageID, chatJID, storeDir, DownloadOptions{})
 }
 
-// DownloadMediaWithOptions downloads an audio message with additional options (e.g. SkipMediaRetry).
+// DownloadMediaWithOptions downloads an audio, image or video message with additional
+// options (e.g. SkipMediaRetry).
 func (c *Client) DownloadMediaWithOptions(
 	ctx context.Context,
 	mediaStore *database.MediaStore,
@@ -183,8 +217,9 @@ func (c *Client) DownloadMediaWithOptions(
 	if info == nil {
 		return nil, fmt.Errorf("message %s not found in chat %s", messageID, chatJID)
 	}
-	if info.MediaType != "audio" {
-		return nil, fmt.Errorf("message %s is not an audio message (type: %s)", messageID, info.MediaType)
+	kind, ok := downloadKindFor(info)
+	if !ok {
+		return nil, fmt.Errorf("message %s cannot be downloaded: only audio, image and video can (type: %s)", messageID, info.MediaType)
 	}
 
 	folderKey := c.mediaFolderKey(chatJID, storeDir)
@@ -193,13 +228,13 @@ func (c *Client) DownloadMediaWithOptions(
 		return nil, fmt.Errorf("failed to create media directory: %w", err)
 	}
 
-	// Format filename: YYYY-MM-DD_HHMMSS_<me|them>_<msgID>.ogg
+	// Format filename: YYYY-MM-DD_HHMMSS_<me|them>_<msgID><ext>
 	who := "them"
 	if info.IsFromMe {
 		who = "me"
 	}
 	tsStr := info.Timestamp.UTC().Format("2006-01-02_150405")
-	filename := fmt.Sprintf("%s_%s_%s.ogg", tsStr, who, safePathComponent(info.ID))
+	filename := fmt.Sprintf("%s_%s_%s%s", tsStr, who, safePathComponent(info.ID), kind.ext)
 	targetPath := filepath.Join(targetDir, filename)
 	absPath, _ := filepath.Abs(targetPath)
 	relPath, _ := filepath.Rel(storeDir, targetPath)
@@ -224,8 +259,8 @@ func (c *Client) DownloadMediaWithOptions(
 			Path:      relPath,
 			AbsPath:   absPath,
 			Filename:  filename,
-			MediaType: "audio",
-			Mimetype:  "audio/ogg; codecs=opus",
+			MediaType: info.MediaType,
+			Mimetype:  kind.mimetype,
 			Cached:    true,
 			Size:      int(fi.Size()),
 			SHA256:    shaStr,
@@ -242,8 +277,8 @@ func (c *Client) DownloadMediaWithOptions(
 				Path:      rec.LocalPath,
 				AbsPath:   cachedAbs,
 				Filename:  filepath.Base(rec.LocalPath),
-				MediaType: "audio",
-				Mimetype:  "audio/ogg; codecs=opus",
+				MediaType: info.MediaType,
+				Mimetype:  kind.mimetype,
 				Cached:    true,
 				Size:      int(fi.Size()),
 				SHA256:    rec.SHA256,
@@ -277,7 +312,7 @@ func (c *Client) DownloadMediaWithOptions(
 	var data []byte
 	var finalDirectPath = directPath
 
-	data, err = c.Client.DownloadMediaWithPath(ctx, directPath, info.FileEncSHA256, info.FileSHA256, info.MediaKey, whatsmeow.MediaAudio, "", false)
+	data, err = c.Client.DownloadMediaWithPath(ctx, directPath, info.FileEncSHA256, info.FileSHA256, info.MediaKey, kind.waType, "", false)
 	if err != nil {
 		if isExpiredMediaErr(err) {
 			if opts.SkipMediaRetry {
@@ -292,7 +327,7 @@ func (c *Client) DownloadMediaWithOptions(
 			}
 			c.logger.Infof("Direct download expired (403/404/410) for message %s, initiating media retry...", messageID)
 			var retryPath string
-			data, retryPath, err = c.downloadWithMediaRetry(ctx, messageID, chatJID, info, whatsmeow.MediaAudio)
+			data, retryPath, err = c.downloadWithMediaRetry(ctx, messageID, chatJID, info, kind.waType)
 			if err != nil {
 				status := retryFailureStatus(err)
 				// Keep the fresh path from the retry (if any) so a failure can be re-examined
@@ -338,7 +373,7 @@ func (c *Client) DownloadMediaWithOptions(
 
 	// 5. Atomic write to destination file
 	if err := writeAtomic(targetPath, data); err != nil {
-		return nil, fmt.Errorf("failed to save decrypted audio to %s: %w", targetPath, err)
+		return nil, fmt.Errorf("failed to save decrypted %s to %s: %w", info.MediaType, targetPath, err)
 	}
 
 	shaHex := fmt.Sprintf("%x", plainHash[:])
@@ -356,8 +391,8 @@ func (c *Client) DownloadMediaWithOptions(
 		Path:      relPath,
 		AbsPath:   absPath,
 		Filename:  filename,
-		MediaType: "audio",
-		Mimetype:  "audio/ogg; codecs=opus",
+		MediaType: info.MediaType,
+		Mimetype:  kind.mimetype,
 		Cached:    false,
 		Size:      len(data),
 		SHA256:    shaHex,

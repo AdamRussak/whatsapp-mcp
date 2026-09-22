@@ -273,15 +273,10 @@ func (c *Client) HandleHistorySync(messageStore *database.MessageStore, historyS
 					continue
 				}
 
-				// Extract text content
-				var content string
-				if msg.Message.Message != nil {
-					if conv := msg.Message.Message.GetConversation(); conv != "" {
-						content = conv
-					} else if ext := msg.Message.Message.GetExtendedTextMessage(); ext != nil {
-						content = ext.GetText()
-					}
-				}
+				// Extract text content with the same function as the live path, so a caption
+				// is stored the same way (ADR 0002). The message is raw here: history sync
+				// is not unwrapped, so a view-once or ephemeral message still yields nothing.
+				content := ExtractTextContent(msg.Message.Message)
 
 				// Store message
 				msgID := ""

@@ -310,7 +310,8 @@ Content-Type: application/json
   "media_path": "/path/to/file.jpg"
 }
 
-# Download one message's media (writes to store/media/<chat>/)
+# Download one message's audio, image or video (writes to store/media/<chat>/).
+# Documents are not downloadable. Media older than ~11-19 days is usually gone from the CDN.
 POST /api/download
 Content-Type: application/json
 
@@ -323,7 +324,8 @@ POST /api/download/batch
 GET    /api/download/batch/{job_id}     # progress
 DELETE /api/download/batch/{job_id}     # cancel a running job
 
-# Stream a downloaded file (range requests supported; .ogg/.mp3 only; ?download=1 to save)
+# Stream a downloaded file (range requests supported; .ogg .mp3 .jpg .jpeg .png .webp .gif
+# .mp4 only; ?download=1 to save)
 GET /api/media/{chat}/{filename}
 
 # Downloaded files with the message behind each (chat, after, before, status, limit, offset)

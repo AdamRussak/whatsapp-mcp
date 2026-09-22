@@ -20,6 +20,14 @@ func TestResolve(t *testing.T) {
 		filepath.Join(chatDir, "b.mp3"),
 		filepath.Join(chatDir, "index.json"),
 		filepath.Join(chatDir, "c.ogg.part"),
+		filepath.Join(chatDir, "p.jpg"),
+		filepath.Join(chatDir, "p2.JPEG"),
+		filepath.Join(chatDir, "p.png"),
+		filepath.Join(chatDir, "p.webp"),
+		filepath.Join(chatDir, "p.gif"),
+		filepath.Join(chatDir, "v.mp4"),
+		filepath.Join(chatDir, "d.pdf"),
+		filepath.Join(chatDir, "p.jpg.part"),
 	} {
 		if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
 			t.Fatal(err)
@@ -27,6 +35,10 @@ func TestResolve(t *testing.T) {
 	}
 	// Symlink inside media/ pointing at the session DB, disguised as audio
 	if err := os.Symlink(filepath.Join(store, "whatsapp.db"), filepath.Join(chatDir, "evil.ogg")); err != nil {
+		t.Fatal(err)
+	}
+	// ... and disguised as a photo (ADR 0002 added image extensions)
+	if err := os.Symlink(filepath.Join(store, "whatsapp.db"), filepath.Join(chatDir, "evil.jpg")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -37,6 +49,15 @@ func TestResolve(t *testing.T) {
 	}{
 		{"972500000000/a.ogg", true, "audio/ogg; codecs=opus"},
 		{"972500000000/b.mp3", true, "audio/mpeg"},
+		{"972500000000/p.jpg", true, "image/jpeg"},
+		{"972500000000/p2.JPEG", true, "image/jpeg"},
+		{"972500000000/p.png", true, "image/png"},
+		{"972500000000/p.webp", true, "image/webp"},
+		{"972500000000/p.gif", true, "image/gif"},
+		{"972500000000/v.mp4", true, "video/mp4"},
+		{"972500000000/d.pdf", false, ""},
+		{"972500000000/p.jpg.part", false, ""},
+		{"972500000000/evil.jpg", false, ""},
 		{"whatsapp.db", false, ""},
 		{"../whatsapp.db", false, ""},
 		{"../messages.db", false, ""},

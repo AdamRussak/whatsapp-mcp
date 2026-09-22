@@ -502,3 +502,49 @@ func TestFreshDatabaseHasTriggerMode(t *testing.T) {
 		t.Fatalf("trigger_mode default = %q, want 'or'", dflt.String)
 	}
 }
+
+// ADR 0002, decision 5: replaying an image stored before the change fills its NULL
+// direct_path, mimetype and seconds, and never writes a caption into content.
+func TestStoreMessageReplayOfImageFillsFieldsNotContent(t *testing.T) {
+	store, err := NewMessageStoreWithDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	at := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	if err := store.StoreChat("c@s.whatsapp.net", "C", at); err != nil {
+		t.Fatal(err)
+	}
+	// As the old binary stored it: no caption, no direct path, no mimetype
+	if err := store.StoreMessage("OLDIMG", "c@s.whatsapp.net", "1", "", at, false,
+		types.MediaMetadata{MediaType: "image", Filename: "image_20260920_120000.jpg", URL: "https://mmg.whatsapp.net/v/i.enc"}); err != nil {
+		t.Fatal(err)
+	}
+	// The phone replays it; the new binary now has the caption and the download fields
+	if err := store.StoreMessage("OLDIMG", "c@s.whatsapp.net", "1", "a caption", at, false,
+		types.MediaMetadata{MediaType: "image", Filename: "image_OLDIMG.jpg", URL: "https://mmg.whatsapp.net/v/i.enc",
+			DirectPath: "/v/i.enc", Mimetype: "image/jpeg"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var content, filename, directPath, mimetype string
+	var isPTTNull bool
+	if err := store.db.QueryRow(
+		`SELECT content, filename, direct_path, mimetype, is_ptt IS NULL FROM messages WHERE id = 'OLDIMG'`,
+	).Scan(&content, &filename, &directPath, &mimetype, &isPTTNull); err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		t.Errorf("content = %q, want the original empty content", content)
+	}
+	if filename != "image_20260920_120000.jpg" {
+		t.Errorf("filename = %q, want the original name", filename)
+	}
+	if directPath != "/v/i.enc" || mimetype != "image/jpeg" {
+		t.Errorf("direct_path = %q, mimetype = %q; want them filled", directPath, mimetype)
+	}
+	if !isPTTNull {
+		t.Error("is_ptt was written for an image")
+	}
+}
