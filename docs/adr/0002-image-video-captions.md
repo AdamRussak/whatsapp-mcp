@@ -1,7 +1,7 @@
 # ADR 0002: Image and video captions, and the metadata a later download needs
 
-- **Status:** Accepted. T1–T4 implemented on branch `image-video-captions`. Not deployed,
-  not committed.
+- **Status:** Implemented and deployed 2026-09-22 (T1–T4, merge `92eba8c`). Live checks
+  still owed for a captioned video, a view-once photo and a voice-note download.
 - **Date:** 2026-09-22
 - **Deciders:** Adam Russak
 - **Scope:** `whatsapp-bridge` (receive path, history sync, listener validation). `messages.db`
@@ -401,3 +401,41 @@ not enqueue an image.
   caption deploy from waiting on that.
 - **Turn auto-download on for images.** A listener built to capture voice notes would
   start writing every matched photo to disk. That is a separate product decision.
+
+## Deploy record, 2026-09-22
+
+No migration, so the schema stays at v5 and the rehearsal steps of the §4.6 checklist in
+`AUDIO_DOWNLOAD_PLAN.md` did not apply. The rest was run:
+
+- **Rollback target.** The running image was tagged `whatsapp-bridge:pre-captions`
+  (`a8f47755317b`).
+- **Backups.** The bridge was stopped first, then `messages.db`, `media.db` and
+  `whatsapp.db` were copied to `store/backups/*_20260922_140123.db`. All three pass
+  `integrity_check`.
+- **Baseline.** 477,528 messages, 3,937 chats, 7 listeners, 0 nicknames, schema 5. None of
+  the 7 listeners has a keyword trigger, so no existing listener changes behaviour.
+- **First deploy, 14:03 UTC,** from the working tree, bridge only, with `--force-recreate`.
+  The new image is `f74c031bd627`. The log printed `messages.db schema version 5`, and
+  `smoke.sh` passed 27 of 27.
+- **Redeploy from main, 14:13 UTC,** at merge `92eba8c`. The build reused image
+  `f74c031bd627` because the sources are identical. Schema 5 logged, smoke 27 of 27.
+
+Checked on the live bridge:
+
+| Check | Result |
+|---|---|
+| `keyword` AND `image` through `POST /api/webhooks/validate` | accepted, nothing saved |
+| `keyword` AND `audio` | R6, with the new wording |
+| `POST /api/download` for a stored document | refused |
+| New images after the deploy | 4 stored; all have `direct_path`, `mimetype = image/jpeg` and an ID filename; 2 carry their caption in `content` |
+| New voice notes | unchanged: `.ogg` name, Opus mimetype, `seconds`, `direct_path` |
+| `POST /api/download` of a fresh captioned image | 166,834-byte JPEG (1080x1920) at `media/<chat>/<ts>_them_<id>.jpg`; `media.db` records `ok` |
+| The same call again | `cached: true` |
+| `GET /api/media/` for that file | 200, `image/jpeg` |
+
+One image row arrived with a direct path and no URL. The download prefers `direct_path`,
+so that row is still downloadable.
+
+Still owed, from the phone: a captioned video (duration in `seconds`, `.mp4` download), a
+view-once photo (type and caption kept, no URL, key or direct path), and a voice-note
+download after the deploy (still `.ogg`).
