@@ -533,7 +533,8 @@ Nothing is required. Optional follow-ups, none of them blocking:
 
 - **Make Enter wait for the running check, then save,** instead of refusing (see Comments
   for review).
-- **Let keywords read captions** (deferred in open question 3). R6 would need revisiting.
+- **Let keywords read captions** (deferred in open question 3, now proposed in
+  [ADR 0002](0002-image-video-captions.md)). R6 would need revisiting.
 - **A real rollback drill** needs a way to serve the API without connecting to WhatsApp
   (plan G-e).
 
@@ -556,7 +557,9 @@ Nothing is required. Optional follow-ups, none of them blocking:
 1. **An n8n workflow reads `trigger`.** It stays the first match. `matched_triggers` is
    added beside it.
 2. **`sticker` stays in the suggestions.** R1 rejects it on save.
-3. **Captions are out of scope.** Keywords keep seeing only plain text and poll questions,
-   and R6 is written for that. Reading captions is a later change.
+3. **Captions are out of scope here.** Keywords keep seeing only plain text and poll
+   questions, and R6 is written for that. Reading captions is proposed in
+   [ADR 0002](0002-image-video-captions.md). Until that ADR is implemented, this one still
+   describes the code.
 4. **The Capture voice notes listener is gone.** It was for testing only, so there is
    nothing to convert to chat triggers.
