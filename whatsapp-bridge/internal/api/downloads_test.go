@@ -311,6 +311,27 @@ func TestServeMediaDownloadFlag(t *testing.T) {
 	}
 }
 
+// A downloaded photo is served with an image content type (ADR 0002, T4).
+func TestServeMediaImage(t *testing.T) {
+	server := downloadsServer(t)
+	dir := filepath.Join(server.storeDir, "media", "972547669192")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "PHOTO.png"), []byte("\x89PNG"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/media/972547669192/PHOTO.png", nil)
+	rec := httptest.NewRecorder()
+	server.handleServeMedia(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Errorf("Content-Type = %q, want image/png", ct)
+	}
+}
+
 // With the contact store present, a download from a chat stored under the user's own LID
 // shows the contact's real name. (The other download tests run without a contacts table,
 // which is what proves names fall back instead of failing the listing.)

@@ -25,7 +25,8 @@ type MediaMetadata struct {
 	FileEncSHA256 []byte
 	FileLength    uint64
 
-	// Added by schema v1, captured from the protobuf for audio messages
+	// Added by schema v1. DirectPath and Mimetype are captured for audio, image, video and
+	// document (ADR 0002); Seconds for audio and video; IsPTT for audio only.
 	DirectPath string
 	Mimetype   string
 	Seconds    uint32

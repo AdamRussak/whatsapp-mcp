@@ -311,3 +311,40 @@ func TestPayloadUnderOr(t *testing.T) {
 		t.Errorf("matched_triggers = %+v, want just %+v", payload.MatchedTriggers, want)
 	}
 }
+
+func captioned(caption string) *waProto.Message {
+	return &waProto.Message{ImageMessage: &waProto.ImageMessage{
+		URL: proto.String("https://mmg.whatsapp.net/v/i.enc"), Caption: proto.String(caption),
+	}}
+}
+
+// ADR 0002, decision 2: a keyword reads an image's caption, in both modes.
+func TestKeywordMatchesCaption(t *testing.T) {
+	or := modeManager("", "or", trig("keyword", "invoice", "contains"))
+	if len(or.MatchesTriggers(message(t, chatA, chatA, captioned("the invoice for March")), "chat")) != 1 {
+		t.Error("OR keyword did not match an image whose caption contains it")
+	}
+	if len(or.MatchesTriggers(message(t, chatA, chatA, captioned("")), "chat")) != 0 {
+		t.Error("OR keyword matched an image with an empty caption")
+	}
+	if len(or.MatchesTriggers(message(t, chatA, chatA, captioned("holiday photos")), "chat")) != 0 {
+		t.Error("OR keyword matched a caption without the word")
+	}
+
+	and := modeManager("", "and", trig("keyword", "invoice", "contains"), trig("media_type", "image", "exact"))
+	if len(and.MatchesTriggers(message(t, chatA, chatA, captioned("invoice attached")), "chat")) != 1 {
+		t.Error("AND keyword + image did not match a captioned image")
+	}
+	if len(and.MatchesTriggers(message(t, chatA, chatA, text("invoice attached")), "chat")) != 0 {
+		t.Error("AND keyword + image matched plain text")
+	}
+}
+
+// The webhook payload carries the caption as content.
+func TestPayloadContentIsCaption(t *testing.T) {
+	got := deliveredPayload(t, "or", []types.WebhookTrigger{trig("keyword", "invoice", "contains")},
+		message(t, chatA, chatA, captioned("invoice attached")))
+	if got.Message.Content != "invoice attached" || got.Message.MediaType != "image" {
+		t.Errorf("content = %q, media_type = %q", got.Message.Content, got.Message.MediaType)
+	}
+}

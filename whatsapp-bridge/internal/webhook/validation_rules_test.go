@@ -103,6 +103,11 @@ func TestValidationRules(t *testing.T) {
 		{name: "R6 near miss: two keywords", config: and(trig("keyword", "invoice", "contains"), trig("keyword", "overdue", "contains"))},
 		{name: "R6 near miss: keyword and a chat", config: and(trig("keyword", "invoice", "contains"), trig("chat_jid", chatA, "exact"))},
 		{name: "R6 keyword and audio under OR is fine", config: or(trig("keyword", "urgent", "contains"), trig("media_type", "audio", "exact"))},
+		// ADR 0002: captions are text, so a keyword beside image, video or document can match.
+		{name: "R6 near miss: keyword and image", config: and(trig("keyword", "invoice", "contains"), trig("media_type", "image", "exact"))},
+		{name: "R6 near miss: keyword and video", config: and(trig("keyword", "invoice", "contains"), trig("media_type", "video", "exact"))},
+		{name: "R6 near miss: keyword and document", config: and(trig("keyword", "invoice", "contains"), trig("media_type", "document", "exact"))},
+		{name: "R6 keyword and audio|poll_vote", config: and(trig("keyword", "invoice", "contains"), trig("media_type", "^(audio|poll_vote)$", "regex")), wantRule: "R6", wantIndex: 0},
 
 		// Undecidable combinations are allowed.
 		{name: "two regexes on one field", config: and(trig("chat_jid", "^1", "regex"), trig("chat_jid", "^2", "regex"))},
@@ -280,5 +285,23 @@ func TestKeywordMatchingEmptyTextIsAllowedWithAudio(t *testing.T) {
 	errs := validate(t, "", and(trig("keyword", "urgent", "contains"), trig("media_type", "audio", "exact")))
 	if len(errs) != 1 || errs[0].Rule != "R6" {
 		t.Errorf("keyword urgent with audio: got %+v, want R6", errs)
+	}
+}
+
+// ADR 0002: the R6 message no longer claims captions are never read, and names the media
+// types that do carry text.
+func TestR6MessageMentionsCaptions(t *testing.T) {
+	errs := validate(t, "", and(trig("keyword", "invoice", "contains"), trig("media_type", "audio", "exact")))
+	if len(errs) != 1 || errs[0].Rule != "R6" {
+		t.Fatalf("got %+v, want R6", errs)
+	}
+	msg := errs[0].Message
+	if strings.Contains(msg, "never captions") {
+		t.Errorf("R6 message still says captions are never read: %q", msg)
+	}
+	for _, want := range []string{"captions", "image", "video", "document"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("R6 message does not mention %q: %q", want, msg)
+		}
 	}
 }

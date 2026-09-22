@@ -692,7 +692,8 @@ func (s *Server) handleBatchJobByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleServeMedia streams downloaded audio files from <store>/media (GET /api/media/{path...})
+// handleServeMedia streams downloaded audio, image and video files from <store>/media
+// (GET /api/media/{path...})
 func (s *Server) handleServeMedia(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)

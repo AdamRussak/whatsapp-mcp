@@ -277,8 +277,9 @@ func (c *ruleCheck) checkMediaOverlap(skipReport bool) []string {
 	return kinds
 }
 
-// checkKeywordsHaveText is R6 (AND): keywords read only plain text and poll questions, so
-// the media types the listener allows must include one that carries text.
+// checkKeywordsHaveText is R6 (AND): keywords read plain text, poll questions and the
+// captions of images, videos and documents (ADR 0002), so the media types the listener
+// allows must include one that carries text.
 func (c *ruleCheck) checkKeywordsHaveText(kinds []string) {
 	for _, kind := range kinds {
 		if whatsapp.CarriesText(kind) {
@@ -287,7 +288,7 @@ func (c *ruleCheck) checkKeywordsHaveText(kinds []string) {
 	}
 	for _, t := range c.live {
 		if t.TriggerType == fieldText && !c.canFireOn(t.WebhookTrigger, kinds[0]) {
-			c.fail("R6", t.index, "Keywords only read plain text and poll questions, never captions, and the media triggers here allow only %s, which has no text. So %s can never match. Remove this keyword, allow media type = poll, or set Match to OR.",
+			c.fail("R6", t.index, "Keywords read plain text, poll questions and the captions of images, videos and documents, and the media triggers here allow only %s, which has no text. So %s can never match. Remove this keyword, allow a media type that has text (poll, image, video or document), or set Match to OR.",
 				kindList(kinds), describe(t.WebhookTrigger))
 		}
 	}

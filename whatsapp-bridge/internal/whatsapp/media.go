@@ -15,20 +15,34 @@ import (
 	"whatsapp-bridge/internal/types"
 )
 
-// ExtractTextContent extracts text content from a WhatsApp message
+// ExtractTextContent extracts the text of a WhatsApp message (ADR 0002, decision 1).
+//
+// The first non-empty value wins, in this order: plain conversation text, extended text,
+// the caption of an image, a video or a document, then a poll's question. It unwraps
+// nothing: on the live path whatsmeow has already removed view-once, ephemeral and
+// document-with-caption wrappers, and history sync hands over the raw message.
 func ExtractTextContent(msg *waProto.Message) string {
 	if msg == nil {
 		return ""
 	}
 
-	// Try to get text content
 	if text := msg.GetConversation(); text != "" {
 		return text
-	} else if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
-		return extendedText.GetText()
+	}
+	if text := msg.GetExtendedTextMessage().GetText(); text != "" {
+		return text
+	}
+	if caption := msg.GetImageMessage().GetCaption(); caption != "" {
+		return caption
+	}
+	if caption := msg.GetVideoMessage().GetCaption(); caption != "" {
+		return caption
+	}
+	if caption := msg.GetDocumentMessage().GetCaption(); caption != "" {
+		return caption
 	}
 
-	// Check for poll creation message - return poll question as text content
+	// A poll's question is its text
 	if poll := GetPollCreationFromMessage(msg); poll != nil {
 		return poll.GetName()
 	}
@@ -90,17 +104,21 @@ func ExtractPollInfo(msg *waProto.Message) *types.PollInfo {
 var ProducedMediaTypes = []string{"audio", "document", "image", "poll", "poll_vote", "video"}
 
 // CarriesText reports whether a message of this media type has text ExtractTextContent
-// reads: plain text ("") and a poll's question. Captions are not read, and a poll vote or
-// view-once audio has none.
+// reads: plain text (""), a poll's question, and the caption of an image, a video or a
+// document (ADR 0002). Audio, a poll vote and view-once audio have none.
 func CarriesText(mediaType string) bool {
-	return mediaType == "" || mediaType == "poll"
+	switch mediaType {
+	case "", "poll", "image", "video", "document":
+		return true
+	}
+	return false
 }
 
 // ExtractMediaInfo extracts media information from a WhatsApp message.
 //
-// msgID names the file for audio, so two voice notes in the same second no longer
-// collide (the old name was built from time.Now() at second resolution). Callers that
-// only need the media type may pass "".
+// msgID names the file for audio, images and videos, so two messages in the same second no
+// longer collide (the old name was built from time.Now() at second resolution). Callers
+// that only need the media type may pass "".
 func ExtractMediaInfo(msg *waProto.Message, msgID string) types.MediaMetadata {
 	if msg == nil {
 		return types.MediaMetadata{}
@@ -118,27 +136,40 @@ func ExtractMediaInfo(msg *waProto.Message, msgID string) types.MediaMetadata {
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
+		// View-once is meant to vanish: keep the type (the caption is content) but no
+		// decryption material, so nothing here can download it later (ADR 0002, decision 4).
+		if img.GetViewOnce() {
+			return types.MediaMetadata{MediaType: "image"}
+		}
 		return types.MediaMetadata{
 			MediaType:     "image",
-			Filename:      "image_" + time.Now().Format("20060102_150405") + ".jpg",
+			Filename:      mediaFilename("image_", msgID, img.GetMimetype(), ".jpg"),
 			URL:           img.GetURL(),
 			MediaKey:      img.GetMediaKey(),
 			FileSHA256:    img.GetFileSHA256(),
 			FileEncSHA256: img.GetFileEncSHA256(),
 			FileLength:    img.GetFileLength(),
+			DirectPath:    img.GetDirectPath(),
+			Mimetype:      img.GetMimetype(),
 		}
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
+		if vid.GetViewOnce() {
+			return types.MediaMetadata{MediaType: "video"}
+		}
 		return types.MediaMetadata{
 			MediaType:     "video",
-			Filename:      "video_" + time.Now().Format("20060102_150405") + ".mp4",
+			Filename:      mediaFilename("video_", msgID, vid.GetMimetype(), ".mp4"),
 			URL:           vid.GetURL(),
 			MediaKey:      vid.GetMediaKey(),
 			FileSHA256:    vid.GetFileSHA256(),
 			FileEncSHA256: vid.GetFileEncSHA256(),
 			FileLength:    vid.GetFileLength(),
+			DirectPath:    vid.GetDirectPath(),
+			Mimetype:      vid.GetMimetype(),
+			Seconds:       vid.GetSeconds(),
 		}
 	}
 
@@ -178,10 +209,41 @@ func ExtractMediaInfo(msg *waProto.Message, msgID string) types.MediaMetadata {
 			FileSHA256:    doc.GetFileSHA256(),
 			FileEncSHA256: doc.GetFileEncSHA256(),
 			FileLength:    doc.GetFileLength(),
+			DirectPath:    doc.GetDirectPath(),
+			Mimetype:      doc.GetMimetype(),
 		}
 	}
 
 	return types.MediaMetadata{}
+}
+
+// MediaExtension maps an image or video mimetype to a file extension, or returns fallback
+// for a missing or unrecognised one. Parameters such as "; codecs=..." are ignored.
+func MediaExtension(mimetype, fallback string) string {
+	base, _, _ := strings.Cut(mimetype, ";")
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "video/mp4":
+		return ".mp4"
+	}
+	return fallback
+}
+
+// mediaFilename names an image or video after its message ID, with the extension its
+// mimetype implies, falling back to a timestamp when no ID is available.
+func mediaFilename(prefix, msgID, mimetype, fallbackExt string) string {
+	ext := MediaExtension(mimetype, fallbackExt)
+	if msgID == "" {
+		return prefix + time.Now().Format("20060102_150405") + ext
+	}
+	return prefix + msgID + ext
 }
 
 // audioFilename names a voice note or audio file after its message ID, falling back to a

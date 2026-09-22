@@ -85,7 +85,7 @@ not about one trigger). `error` is the first message:
 | R3 | AND | two different chats, senders or media types (a phone number and its LID are one contact) |
 | R4 | AND | a `contains`/`regex` that cannot match the `exact` value on the same field |
 | R5 | AND | media-type triggers that no one media type satisfies |
-| R6 | AND | a keyword beside media triggers that allow no text (keywords read plain text and poll questions, not captions) |
+| R6 | AND | a keyword beside media triggers that allow no text (keywords read plain text, poll questions and the captions of images, videos and documents; audio and poll votes have none) |
 
 An enabled trigger other than `all` also needs a value.
 

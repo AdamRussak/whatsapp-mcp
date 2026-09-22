@@ -111,7 +111,9 @@ func TestDownloadMediaIncompleteMetadata(t *testing.T) {
 	}
 }
 
-func TestDownloadMediaRejectsNonAudio(t *testing.T) {
+// Text and unknown messages have nothing to download. Documents are covered in
+// download_image_test.go.
+func TestDownloadMediaRejectsTextAndMissing(t *testing.T) {
 	dir, c, ms, media, _ := newDownloadFixture(t, make([]byte, 32))
 	for _, id := range []string{"TXT1", "MISSING"} {
 		if _, err := c.DownloadMedia(context.Background(), media, ms, id, testChat, dir); err == nil {
