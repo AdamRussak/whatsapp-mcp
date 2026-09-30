@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 	"whatsapp-bridge/internal/types"
 	"whatsapp-bridge/internal/webhook"
 	"whatsapp-bridge/internal/whatsapp"
+
+	"go.mau.fi/whatsmeow"
+	watypes "go.mau.fi/whatsmeow/types"
 )
 
 // handleSendMessage handles the message sending API endpoint
@@ -1173,4 +1177,77 @@ func positiveInt(raw string, def int) (int, error) {
 		return 0, fmt.Errorf("not a positive integer: %q", raw)
 	}
 	return n, nil
+}
+
+// handleBackfill asks the phone for older history in one chat (GET /api/backfill).
+//
+// WhatsApp only sends a limited window of past messages when the bridge first connects.
+// This looks up the oldest message stored for the chat and requests the `count` messages
+// before it. The phone answers with a history sync event that the normal handler stores,
+// so the new rows show up in messages.db a few seconds after this returns.
+//
+// Query: chat (JID, required), count (default 200).
+func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		SendJSONError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chat := strings.TrimSpace(r.URL.Query().Get("chat"))
+	jid, err := watypes.ParseJID(chat)
+	if err != nil || chat == "" {
+		SendJSONError(w, "chat must be a valid JID", http.StatusBadRequest)
+		return
+	}
+	count, err := positiveInt(r.URL.Query().Get("count"), 200)
+	if err != nil {
+		SendJSONError(w, "count must be a positive integer", http.StatusBadRequest)
+		return
+	}
+	if !s.client.IsConnected() || s.client.Store.ID == nil {
+		SendJSONError(w, "WhatsApp client is not connected", http.StatusServiceUnavailable)
+		return
+	}
+
+	ref, err := s.messageStore.OldestMessage(chat)
+	if errors.Is(err, sql.ErrNoRows) {
+		SendJSONError(w, "no stored message for that chat; backfill needs one message to start from", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		SendJSONError(w, fmt.Sprintf("Failed to look up chat: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	info := &watypes.MessageInfo{
+		MessageSource: watypes.MessageSource{Chat: jid, IsFromMe: ref.IsFromMe, IsGroup: jid.Server == watypes.GroupServer},
+		ID:            ref.ID,
+		Timestamp:     ref.Timestamp,
+	}
+	switch {
+	case ref.IsFromMe:
+		info.Sender = s.client.Store.ID.ToNonAD()
+	case info.IsGroup:
+		if sender, perr := watypes.ParseJID(ref.Sender); perr == nil && strings.Contains(ref.Sender, "@") {
+			info.Sender = sender
+		} else {
+			info.Sender = watypes.NewJID(ref.Sender, watypes.DefaultUserServer)
+		}
+	default:
+		info.Sender = jid
+	}
+
+	msg := s.client.BuildHistorySyncRequest(info, count)
+	// The wrapper's SendMessage is the chat-message helper; the peer request needs the underlying client.
+	if _, err := s.client.Client.SendMessage(r.Context(), s.client.Store.ID.ToNonAD(), msg, whatsmeow.SendRequestExtra{Peer: true}); err != nil {
+		SendJSONError(w, fmt.Sprintf("History request failed: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	SendJSONSuccess(w, map[string]interface{}{
+		"chat":         chat,
+		"requested":    count,
+		"oldest_known": ref.Timestamp.UTC().Format(time.RFC3339),
+		"oldest_id":    ref.ID,
+	}, "History requested; older messages arrive through the normal sync and are stored shortly")
 }

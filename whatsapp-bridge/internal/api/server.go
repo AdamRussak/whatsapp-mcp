@@ -103,6 +103,9 @@ func (s *Server) registerHandlers() {
 	// Chat list, for the UI's trigger picker
 	http.HandleFunc("/api/chats", CorsMiddleware(s.handleChats))
 
+	// Ask the phone for older messages in one chat
+	http.HandleFunc("/api/backfill", CorsMiddleware(s.handleBackfill))
+
 	// Webhook management endpoints
 	http.HandleFunc("/api/webhooks", CorsMiddleware(s.handleWebhooks))
 	// A fixed path: the mux prefers it over the /api/webhooks/{id} prefix below.

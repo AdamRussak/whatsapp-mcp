@@ -582,3 +582,26 @@ func (store *MessageStore) GetChatsByJIDs(jids []string) ([]ChatSummary, error) 
 	sort.SliceStable(chats, func(i, j int) bool { return chats[i].LastMessageTime > chats[j].LastMessageTime })
 	return chats, nil
 }
+
+// MessageRef identifies one stored message: enough to ask WhatsApp for the history before it.
+type MessageRef struct {
+	ID        string
+	ChatJID   string
+	Sender    string
+	Timestamp time.Time
+	IsFromMe  bool
+}
+
+// OldestMessage returns the earliest stored message for a chat, ignoring rows without an id.
+// It returns sql.ErrNoRows when nothing is stored for the chat yet.
+func (store *MessageStore) OldestMessage(chatJID string) (*MessageRef, error) {
+	ref := &MessageRef{ChatJID: chatJID}
+	err := store.db.QueryRow(
+		`SELECT id, sender, timestamp, is_from_me FROM messages WHERE chat_jid = ? AND id != '' ORDER BY timestamp ASC LIMIT 1`,
+		chatJID,
+	).Scan(&ref.ID, &ref.Sender, &ref.Timestamp, &ref.IsFromMe)
+	if err != nil {
+		return nil, err
+	}
+	return ref, nil
+}
