@@ -334,6 +334,9 @@ GET /api/downloads
 # Chats for pickers, searchable by name or phone number (q, type=all|contact|group, limit)
 GET /api/chats
 
+# Ask the phone for older history in one chat; results arrive through the normal sync (chat, count)
+GET /api/backfill?chat=1234567890@s.whatsapp.net&count=200
+
 # What the next retention sweep would remove — read-only
 GET /api/retention/preview
 
@@ -343,6 +346,13 @@ GET /api/health
 
 A download removed by retention returns **410 Gone** from `POST /api/download` unless the
 body sets `"force": true`.
+
+WhatsApp only sends a limited window of past messages when the bridge first connects, so
+older conversations can look thin. `GET /api/backfill` asks the phone for messages older than
+the oldest one already stored for that chat; the reply comes back as a normal history sync and
+is written to the same database, so allow a few seconds before reading. The phone has to be
+online. `scripts/backfill.py <YYYY-MM-DD> <chat_jid> [...]` repeats the request until a chat
+reaches the date or the phone stops returning anything older.
 
 #### Webhook Management
 ```bash
